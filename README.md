@@ -4,6 +4,8 @@
 
 安装完成后，在仓库根目录运行 `python examples/stock_trading/trade.py` 进入交互实验。以下为上游项目原始说明。
 
+macOS Apple Silicon 用户请按中文指南从团队源码构建安装：本机已复现缓存的 0.1.0 wheel 存在扩展符号缺失问题，修正构建后已验证 SQL、语义请求与交易流程。下方上游的 `pip install jevdb` 不能替代该平台的完整配置步骤。
+
 <p align="center">
   <img src="docs/assets/jevdb-logo.png" alt="JEVDB logo" width="560">
 </p>
