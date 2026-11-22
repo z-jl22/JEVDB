@@ -1,0 +1,7 @@
+# 本文件是可调整的模拟交易参数，并非行情网站提供的历史费率；费率用小数表示，例如0.0005=0.05%
+# symbol=六位股票代码；buy_lot=每次买入的最小股数及递增单位；sell_lot=每次卖出的股数递增单位；tick_size=最小报价单位（元/股）
+# commission_rate=双边佣金率；min_commission=每笔最低佣金（元）；transfer_fee_rate=双边过户费率；stamp_duty_rate=仅卖出的印花税率
+# slippage_rate=开盘价上的模拟滑点率；price_limit_rate=相对前收盘价的涨跌幅限制；max_participation_rate=单笔成交股数占当日成交量股数的最大比例
+symbol,buy_lot,sell_lot,tick_size,commission_rate,min_commission,transfer_fee_rate,stamp_duty_rate,slippage_rate,price_limit_rate,max_participation_rate
+000858,100,1,0.01,0.0003,5.00,0.00001,0.0005,0.0005,0.10,0.01
+601318,100,1,0.01,0.0003,5.00,0.00001,0.0005,0.0005,0.10,0.01

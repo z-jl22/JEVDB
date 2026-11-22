@@ -1,3 +1,9 @@
+# 课程股票模拟交易项目
+
+本仓库基于 [PDAIS/JEVDB](https://github.com/PDAIS/JEVDB)，保留上游源码与历史，并新增新闻驱动的股票模拟交易实验。小组成员请先阅读 [中文运行指南](README_中文运行指南.md)，交易机制与数据来源见 [股票示例说明](examples/stock_trading/README.md)。
+
+安装完成后，在仓库根目录运行 `python examples/stock_trading/trade.py` 进入交互实验。以下为上游项目原始说明。
+
 <p align="center">
   <img src="docs/assets/jevdb-logo.png" alt="JEVDB logo" width="560">
 </p>
