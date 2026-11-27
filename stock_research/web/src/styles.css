@@ -703,6 +703,18 @@ body {
   background: var(--bg-input);
 }
 
+/* Long tables: scroll vertically and keep the header visible. */
+.table-wrap--scroll {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.table-wrap--scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
 .data-table {
   width: 100%;
   border-collapse: collapse;

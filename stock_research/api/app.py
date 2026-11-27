@@ -1,4 +1,4 @@
-"""FastAPI REST & SSE backend integrating M1 storage/ingest, M2 quant/ledger, and M3 Pi agent."""
+﻿"""FastAPI REST & SSE backend integrating M1 storage/ingest, M2 quant/ledger, and M3 Pi agent."""
 
 from __future__ import annotations
 
@@ -29,6 +29,8 @@ from stock_research.quant.backtest import (
     _to_date as _backtest_to_date,
     classify_news_sentiment,
     compare_strategies,
+    execution_sensitivity,
+    fee_sensitivity,
     load_bars_from_duckdb,
     run_backtest,
 )
@@ -428,6 +430,25 @@ class QuantCompareRequest(BaseModel):
         )
         return self
 
+
+class FeeSensitivityRequest(BaseModel):
+    strategy_id: str
+    symbols: list[str] = Field(..., min_length=1)
+    start_date: str = Field(..., min_length=4)
+    end_date: str = Field(..., min_length=4)
+    initial_capital: _StrictFloat = Field(default=100000.0, gt=0.0, le=1e12)
+    scenarios: list[list[float]] | None = None
+    market: str = "CN"
+
+
+class ExecutionSensitivityRequest(BaseModel):
+    strategy_id: str
+    symbols: list[str] = Field(..., min_length=1)
+    start_date: str = Field(..., min_length=4)
+    end_date: str = Field(..., min_length=4)
+    initial_capital: _StrictFloat = Field(default=100000.0, gt=0.0, le=1e12)
+    modes: list[str] | None = None
+    market: str = "CN"
 
 class PortfolioRiskRequest(BaseModel):
     holdings: list[dict[str, Any]] = Field(default_factory=list)
@@ -1217,6 +1238,51 @@ def create_app() -> FastAPI:
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @application.post("/api/quant/fee-sensitivity")
+    def api_quant_fee_sensitivity(req: FeeSensitivityRequest) -> JSONResponse:
+        try:
+            db_path = _resolve_market_db_path()
+            with _MARKET_DB_LOCK:
+                with db_session(db_path) as con:
+                    _ensure_baseline_seeded(con)
+                    rows = fee_sensitivity(
+                        req.strategy_id,
+                        req.symbols,
+                        req.start_date,
+                        req.end_date,
+                        initial_capital=req.initial_capital,
+                        scenarios=req.scenarios,
+                        market=req.market.upper(),
+                        con=con,
+                    )
+            return JSONResponse(_json_safe({"strategy_id": req.strategy_id, "rows": rows}))
+        except (StrategyNotFoundError, KeyError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.post("/api/quant/execution-sensitivity")
+    def api_quant_execution_sensitivity(req: ExecutionSensitivityRequest) -> JSONResponse:
+        try:
+            db_path = _resolve_market_db_path()
+            with _MARKET_DB_LOCK:
+                with db_session(db_path) as con:
+                    _ensure_baseline_seeded(con)
+                    rows = execution_sensitivity(
+                        req.strategy_id,
+                        req.symbols,
+                        req.start_date,
+                        req.end_date,
+                        initial_capital=req.initial_capital,
+                        modes=req.modes,
+                        market=req.market.upper(),
+                        con=con,
+                    )
+            return JSONResponse(_json_safe({"strategy_id": req.strategy_id, "rows": rows}))
+        except (StrategyNotFoundError, KeyError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     @application.post("/api/quant/portfolio-risk")
     def api_quant_portfolio_risk(req: PortfolioRiskRequest) -> JSONResponse:
         try:

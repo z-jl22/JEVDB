@@ -5,11 +5,21 @@ import {
   formatNumber,
   formatPct,
   type CompareResult,
+  type ExecutionScenarioRow,
+  type ExecutionSensitivityResponse,
+  type FeeScenarioRow,
+  type FeeSensitivityResponse,
   type PortfolioRiskResult,
   type StrategySpec,
 } from "../api";
 
 const SERIES_COLORS = ["#38bdf8", "#f59e0b", "#a855f7", "#22c55e", "#f43f5e"];
+
+const EXEC_LABELS: Record<string, string> = {
+  next_open: "t+1 开盘",
+  next_close: "t+1 收盘",
+  t2_open: "t+2 开盘",
+};
 
 function isoDaysAgo(days: number): string {
   const dt = new Date();
@@ -34,6 +44,8 @@ export default function QuantView() {
   const [autoFetch, setAutoFetch] = useState(true);
 
   const [compareRes, setCompareRes] = useState<CompareResult | null>(null);
+  const [feeRows, setFeeRows] = useState<FeeScenarioRow[]>([]);
+  const [execRows, setExecRows] = useState<ExecutionScenarioRow[]>([]);
   const [riskRes, setRiskRes] = useState<PortfolioRiskResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
@@ -115,6 +127,41 @@ export default function QuantView() {
         });
         setCompareRes(cmp);
         setRiskRes(risk);
+        try {
+          const fee = await apiJson<FeeSensitivityResponse>("/api/quant/fee-sensitivity", {
+            method: "POST",
+            body: JSON.stringify({
+              strategy_id: stratIds[0],
+              symbols: syms,
+              start_date: sDate,
+              end_date: eDate,
+              initial_capital: initCap,
+              market: mkt,
+            }),
+          });
+          setFeeRows(fee.rows || []);
+        } catch {
+          setFeeRows([]);
+        }
+        try {
+          const exec = await apiJson<ExecutionSensitivityResponse>(
+            "/api/quant/execution-sensitivity",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                strategy_id: stratIds[0],
+                symbols: syms,
+                start_date: sDate,
+                end_date: eDate,
+                initial_capital: initCap,
+                market: mkt,
+              }),
+            }
+          );
+          setExecRows(exec.rows || []);
+        } catch {
+          setExecRows([]);
+        }
         if (cmp.auto_fetched_symbols && cmp.auto_fetched_symbols.length > 0) {
           setStatusMsg(
             `已自动联网补齐 ${cmp.auto_fetched_symbols.join(", ")} 在 ${sDate} ~ ${eDate} 区间的历史行情并完成回测。`
@@ -229,7 +276,7 @@ export default function QuantView() {
 
     if (compareRes?.benchmark_curve && compareRes.benchmark_curve.length > 0) {
       series.push({
-        name: "等权基准",
+        name: "满仓基准",
         type: "line",
         smooth: true,
         showSymbol: false,
@@ -237,6 +284,19 @@ export default function QuantView() {
         lineStyle: { width: 1.5, type: "dashed", color: "#94a3b8" },
         itemStyle: { color: "#94a3b8" },
         data: compareRes.benchmark_curve.map((p) => Number(p.equity.toFixed(2))),
+      });
+    }
+
+    if (compareRes?.benchmark_aligned_curve && compareRes.benchmark_aligned_curve.length > 0) {
+      series.push({
+        name: "同仓位基准",
+        type: "line",
+        smooth: true,
+        showSymbol: false,
+        yAxisIndex: 0,
+        lineStyle: { width: 1.5, type: "dotted", color: "#22c55e" },
+        itemStyle: { color: "#22c55e" },
+        data: compareRes.benchmark_aligned_curve.map((p) => Number(p.equity.toFixed(2))),
       });
     }
 
@@ -449,6 +509,8 @@ export default function QuantView() {
     { label: "近 6 月", start: isoDaysAgo(180), end: isoDaysAgo(0) },
     { label: "近 1 年", start: isoDaysAgo(365), end: isoDaysAgo(0) },
   ];
+
+  const primaryResult = compareRes ? Object.values(compareRes.results)[0] : undefined;
 
   return (
     <div>
@@ -691,6 +753,120 @@ export default function QuantView() {
             </div>
           </div>
           <div ref={corrElRef} className="chart-box-sm" style={{ height: 210, minHeight: 210 }} />
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <h3 className="card-title" style={{ margin: 0 }}>
+            成本归因与费率敏感性
+          </h3>
+          <span className="muted">
+            {primaryResult ? `样本策略：${primaryResult.strategy_name || primaryResult.strategy_id}` : "回测后自动计算"}
+          </span>
+        </div>
+        <div className="kpi-grid" style={{ marginTop: 10 }}>
+          <div className="kpi-card">
+            <div className="kpi-label">毛收益（不计费用）</div>
+            <div className="kpi-val">{formatPct(primaryResult?.metrics.gross_return)}</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-label">净收益</div>
+            <div className="kpi-val">{formatPct(primaryResult?.metrics.total_return)}</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-label">累计费用</div>
+            <div className="kpi-val">{formatNumber(primaryResult?.metrics.total_fees, 2)} 元</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-label">费用占初始资金</div>
+            <div className="kpi-val">{formatPct(primaryResult?.metrics.fee_drag)}</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-label">换手率</div>
+            <div className="kpi-val">{formatNumber(primaryResult?.metrics.turnover, 2)}</div>
+          </div>
+        </div>
+        <div className="table-wrap table-wrap--scroll" style={{ marginTop: 10 }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>费率</th>
+                <th>最低佣金</th>
+                <th>净收益</th>
+                <th>毛收益</th>
+                <th>累计费用</th>
+                <th>费用占比</th>
+                <th>成交笔数</th>
+              </tr>
+            </thead>
+            <tbody>
+              {feeRows.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="muted">
+                    回测后自动计算四组费率情景
+                  </td>
+                </tr>
+              ) : (
+                feeRows.map((row) => (
+                  <tr key={`${row.commission_rate}-${row.min_commission}`}>
+                    <td>{formatPct(row.commission_rate, 3)}</td>
+                    <td>{formatNumber(row.min_commission, 2)} 元</td>
+                    <td
+                      className={
+                        (row.total_return ?? 0) >= 0 ? "pos-num" : "neg-num"
+                      }
+                    >
+                      {formatPct(row.total_return)}
+                    </td>
+                    <td>{formatPct(row.gross_return)}</td>
+                    <td>{formatNumber(row.total_fees, 2)}</td>
+                    <td>{formatPct(row.fee_drag)}</td>
+                    <td>{row.total_trades ?? 0}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <h3 className="card-title" style={{ marginTop: 14 }}>
+          执行时点敏感性
+        </h3>
+        <div className="table-wrap table-wrap--scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>执行假设</th>
+                <th>净收益</th>
+                <th>最大回撤</th>
+                <th>夏普</th>
+                <th>成交笔数</th>
+                <th>累计费用</th>
+              </tr>
+            </thead>
+            <tbody>
+              {execRows.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="muted">
+                    回测后自动对比 t+1 开盘 / t+1 收盘 / t+2 开盘
+                  </td>
+                </tr>
+              ) : (
+                execRows.map((row) => (
+                  <tr key={row.execution}>
+                    <td>{EXEC_LABELS[row.execution] || row.execution}</td>
+                    <td className={(row.total_return ?? 0) >= 0 ? "pos-num" : "neg-num"}>
+                      {formatPct(row.total_return)}
+                    </td>
+                    <td className="neg-num">{formatPct(row.max_drawdown)}</td>
+                    <td>{formatNumber(row.sharpe_ratio)}</td>
+                    <td>{row.total_trades ?? 0}</td>
+                    <td>{formatNumber(row.total_fees, 2)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

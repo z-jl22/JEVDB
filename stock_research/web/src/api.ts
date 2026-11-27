@@ -182,6 +182,41 @@ export interface BacktestMetrics {
   win_rate?: number;
   profit_factor?: number;
   turnover?: number;
+  total_fees?: number;
+  gross_return?: number;
+  fee_drag?: number;
+}
+
+export interface FeeScenarioRow {
+  commission_rate: number;
+  min_commission: number;
+  final_equity: number;
+  total_return?: number | null;
+  gross_return?: number | null;
+  fee_drag?: number | null;
+  total_fees?: number | null;
+  turnover?: number | null;
+  total_trades?: number | null;
+}
+
+export interface FeeSensitivityResponse {
+  strategy_id: string;
+  rows: FeeScenarioRow[];
+}
+
+export interface ExecutionScenarioRow {
+  execution: string;
+  final_equity: number;
+  total_return?: number | null;
+  max_drawdown?: number | null;
+  sharpe_ratio?: number | null;
+  total_trades?: number | null;
+  total_fees?: number | null;
+}
+
+export interface ExecutionSensitivityResponse {
+  strategy_id: string;
+  rows: ExecutionScenarioRow[];
 }
 
 export interface BacktestResult {
@@ -198,6 +233,7 @@ export interface BacktestResult {
     date: string;
     equity: number;
     benchmark_equity?: number;
+    benchmark_aligned_equity?: number;
     drawdown?: number;
   }>;
   trades: Array<Record<string, unknown>>;
@@ -221,9 +257,10 @@ export interface CompareResult {
     annualized_return?: number;
     win_rate?: number;
   }>;
-  aligned_equity_curves: Array<{ date: string; benchmark_equity?: number } & Record<string, number | string>>;
+  aligned_equity_curves: Array<{ date: string; benchmark_equity?: number; benchmark_aligned_equity?: number } & Record<string, number | string>>;
   aligned_drawdown_curves: Array<{ date: string } & Record<string, number | string>>;
   benchmark_curve: Array<{ date: string; equity: number }>;
+  benchmark_aligned_curve: Array<{ date: string; equity: number }>;
   auto_fetched_symbols?: string[];
 }
 

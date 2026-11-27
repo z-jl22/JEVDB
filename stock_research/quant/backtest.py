@@ -8,7 +8,7 @@ execution (day t+1 open), CN A-share rules (T+1, 100-share buy lot, 1-share sell
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
@@ -141,6 +141,7 @@ class BacktestResult:
     benchmark_metrics: dict[str, Any]
     assumptions: dict[str, Any]
     reproducibility_hash: str
+    benchmark_aligned_metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -158,6 +159,7 @@ class BacktestResult:
             "trades": list(self.trades),
             "metrics": dict(self.metrics),
             "benchmark_metrics": dict(self.benchmark_metrics),
+            "benchmark_aligned_metrics": dict(self.benchmark_aligned_metrics),
             "assumptions": dict(self.assumptions),
             "reproducibility_hash": self.reproducibility_hash,
         }
@@ -178,6 +180,7 @@ class ComparisonResult:
     benchmark_curve: list[dict[str, Any]]
     trade_logs: dict[str, list[dict[str, Any]]]
     reproducibility_hash: str
+    benchmark_aligned_curve: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -192,6 +195,7 @@ class ComparisonResult:
             "aligned_equity_curves": list(self.aligned_equity_curves),
             "aligned_drawdown_curves": list(self.aligned_drawdown_curves),
             "benchmark_curve": list(self.benchmark_curve),
+            "benchmark_aligned_curve": list(self.benchmark_aligned_curve),
             "trade_logs": dict(self.trade_logs),
             "reproducibility_hash": self.reproducibility_hash,
         }
@@ -1084,6 +1088,82 @@ def _resolve_market_rules(
     return out
 
 
+def _simulate_passive_benchmark(
+    bar_map: dict[tuple[date, str], Any],
+    days: list[date],
+    symbols: list[str],
+    market_rules: dict[str, MarketRule],
+    capital: float,
+    weight_cap: float | None,
+) -> dict[str, float]:
+    """Buy equal-weight at the first executable open and hold, with real costs.
+
+    weight_cap=None gives the fully invested benchmark; passing max_weight gives
+    the same-exposure benchmark used to isolate stock-picking from position size.
+    """
+    start_cap = _cents(float(capital))
+    if not days or not symbols:
+        return {}
+    entry_idx = 1 if len(days) > 1 else 0
+    entry_day = days[entry_idx]
+    prev_day = days[entry_idx - 1] if entry_idx > 0 else None
+
+    budget = start_cap / len(symbols)
+    if weight_cap is not None:
+        budget = min(budget, start_cap * weight_cap)
+
+    cash = start_cap
+    qty: dict[str, int] = {sym: 0 for sym in symbols}
+    last_close: dict[str, float] = {}
+    if prev_day is not None:
+        for sym in symbols:
+            prev_bar = bar_map.get((prev_day, sym))
+            if prev_bar is not None:
+                last_close[sym] = prev_bar.close
+
+    for sym in sorted(symbols):
+        bar = bar_map.get((entry_day, sym))
+        if bar is None:
+            continue
+        rule = market_rules[sym]
+        price = _slipped_price(bar.open, rule.slippage_rate, "BUY", rule.tick_size)
+        prior = last_close.get(sym)
+        if rule.price_limit_rate is not None and prior is not None:
+            upper = _rounded_price(prior * (1.0 + rule.price_limit_rate), rule.tick_size)
+            if bar.open >= upper or price > upper:
+                continue
+        if price < bar.low or price > bar.high:
+            continue
+        affordable = min(budget, cash)
+        if bar.volume:
+            affordable = min(affordable, bar.volume * rule.max_participation_rate * price)
+        quantity = int(affordable / price // rule.buy_lot) * rule.buy_lot
+        while quantity > 0:
+            commission, transfer_fee, _ = _transaction_cost(quantity, price, rule, "BUY")
+            if _cents(quantity * price + commission + transfer_fee) <= cash + 1e-8:
+                break
+            quantity -= rule.buy_lot
+        if quantity <= 0:
+            continue
+        commission, transfer_fee, _ = _transaction_cost(quantity, price, rule, "BUY")
+        cash = _cents(cash - quantity * price - commission - transfer_fee)
+        qty[sym] += quantity
+        last_close[sym] = bar.close
+
+    curve: dict[str, float] = {}
+    for day in days:
+        for sym in symbols:
+            bar = bar_map.get((day, sym))
+            if bar is not None:
+                last_close[sym] = bar.close
+        if day < entry_day:
+            curve[day.isoformat()] = start_cap
+            continue
+        value = cash + sum(qty[sym] * last_close.get(sym, 0.0) for sym in symbols)
+        curve[day.isoformat()] = _cents(value)
+    return curve
+
+
 def run_backtest(
     strategy_id: str | StrategySpec,
     symbols: list[str],
@@ -1093,6 +1173,7 @@ def run_backtest(
     seed: int = 42,
     market: str = "CN",
     *,
+    execution: str = "next_open",
     bars: list[dict[str, Any]] | dict[tuple[Any, str], Any] | str | Path | None = None,
     fundamentals: list[dict[str, Any]] | dict[str, list[dict[str, Any]]] | None = None,
     news: list[dict[str, Any]] | None = None,
@@ -1120,6 +1201,10 @@ def run_backtest(
     mkt = str(market or "CN").strip().upper()
     if mkt not in {"CN", "US"}:
         raise ValueError(f"market must be 'CN' or 'US', got {market!r}")
+    execution = str(execution or "next_open").strip().lower()
+    if execution not in {"next_open", "next_close", "t2_open"}:
+        raise ValueError(f"Unsupported execution: {execution!r}")
+    execution_delay = 2 if execution == "t2_open" else 1
     norm_syms = sorted({_normalize_symbol_for_market(s, mkt) for s in raw_syms})
 
     spec = (
@@ -1135,6 +1220,14 @@ def run_backtest(
     all_days = sorted({dt for dt, _ in bar_map if start_dt <= dt <= end_dt})
     if not all_days:
         raise ValueError(f"No bars available for {norm_syms} in [{start_dt}, {end_dt}]")
+
+    passive_full = _simulate_passive_benchmark(
+        bar_map, all_days, norm_syms, market_rules, float(initial_capital), None
+    )
+    aligned_cap = min(_resolve_max_weight(spec.params, market_rules[sym]) for sym in norm_syms)
+    passive_aligned = _simulate_passive_benchmark(
+        bar_map, all_days, norm_syms, market_rules, float(initial_capital), aligned_cap
+    )
 
     fund_map = _normalize_fundamentals(
         fundamentals if fundamentals is not None else db_funds,
@@ -1158,18 +1251,18 @@ def run_backtest(
     lots: dict[str, list[list[Any]]] = {s: [] for s in norm_syms}
     last_known_close: dict[str, float] = dict(previous_close)
     prev_features_by_sym: dict[str, dict[str, Any]] = {}
-    pending_signals: list[dict[str, Any]] = []
+    pending_queue: list[list[dict[str, Any]]] = []
 
     equity_curve: list[dict[str, Any]] = []
     trades: list[dict[str, Any]] = []
     peak_equity = cash
-    benchmark_anchors: dict[str, float] = {}
     benchmark_curve: list[dict[str, Any]] = []
+    benchmark_aligned_curve: list[dict[str, Any]] = []
 
     for day_idx, day in enumerate(all_days):
-        # Phase 1: Execute pending signals from day_{t-1} close at day_t open
+        # Phase 1: Execute signals whose delay has elapsed
         ordered_signals = sorted(
-            pending_signals,
+            pending_queue.pop(0) if len(pending_queue) >= execution_delay else [],
             key=lambda sig: (sig["action"] != "SELL", -float(sig["score"]), sig["symbol"]),
         )
         for sig in ordered_signals:
@@ -1200,15 +1293,16 @@ def run_backtest(
                 )
                 continue
 
-            fill_price = _slipped_price(bar.open, rule.slippage_rate, action, rule.tick_size)
+            ref_price = bar.close if execution == "next_close" else bar.open
+            fill_price = _slipped_price(ref_price, rule.slippage_rate, action, rule.tick_size)
             prior = previous_close.get(sym)
 
             # Price limit check (CN)
             if rule.price_limit_rate is not None and prior is not None:
                 upper = _rounded_price(prior * (1.0 + rule.price_limit_rate), rule.tick_size)
                 lower = _rounded_price(prior * (1.0 - rule.price_limit_rate), rule.tick_size)
-                if (action == "BUY" and (bar.open >= upper or fill_price > upper)) or (
-                    action == "SELL" and (bar.open <= lower or fill_price < lower)
+                if (action == "BUY" and (ref_price >= upper or fill_price > upper)) or (
+                    action == "SELL" and (ref_price <= lower or fill_price < lower)
                 ):
                     trades.append(
                         {
@@ -1422,8 +1516,6 @@ def run_backtest(
             if bar is not None:
                 bar_history_by_sym[sym].append(bar)
                 last_known_close[sym] = bar.close
-                if sym not in benchmark_anchors:
-                    benchmark_anchors[sym] = bar.close
             sym_qty = sum(lot[0] for lot in lots[sym])
             if sym_qty > 0 and sym in last_known_close:
                 market_value += sym_qty * last_known_close[sym]
@@ -1434,28 +1526,26 @@ def run_backtest(
             peak_equity = equity
         drawdown = round((peak_equity - equity) / peak_equity, 6) if peak_equity > 0 else 0.0
 
-        # Equal-weight buy-and-hold benchmark
-        rel_vals = [
-            last_known_close[s] / benchmark_anchors[s]
-            for s in norm_syms
-            if s in benchmark_anchors and s in last_known_close and benchmark_anchors[s] > 0
-        ]
-        bench_equity = _cents(float(initial_capital) * statistics.fmean(rel_vals)) if rel_vals else _cents(float(initial_capital))
+        # Tradable passive benchmarks: fully invested and same-exposure
+        bench_equity = passive_full.get(day.isoformat(), _cents(float(initial_capital)))
+        bench_aligned_equity = passive_aligned.get(day.isoformat(), _cents(float(initial_capital)))
 
         equity_curve.append(
             {
                 "date": day.isoformat(),
                 "equity": equity,
                 "benchmark_equity": bench_equity,
+                "benchmark_aligned_equity": bench_aligned_equity,
                 "drawdown": drawdown,
                 "cash": cash,
                 "market_value": market_value,
             }
         )
         benchmark_curve.append({"date": day.isoformat(), "equity": bench_equity})
+        benchmark_aligned_curve.append({"date": day.isoformat(), "equity": bench_aligned_equity})
 
-        # Phase 3: Evaluate causal signals at day_t close for day_{t+1} open
-        pending_signals = []
+        # Phase 3: Evaluate causal signals at day_t close, executed after the delay
+        new_signals: list[dict[str, Any]] = []
         if day_idx + 1 < len(all_days):
             for sym in norm_syms:
                 if bar_map.get((day, sym)) is None:
@@ -1489,7 +1579,7 @@ def run_backtest(
 
                 action = sig_out["action"]
                 if action == "SELL" and held_qty > 0:
-                    pending_signals.append(
+                    new_signals.append(
                         {"symbol": sym, "action": "SELL", "score": sig_out["score"], "reason": sig_out["reason"]}
                     )
                 elif action == "BUY":
@@ -1497,9 +1587,11 @@ def run_backtest(
                     max_w = _resolve_max_weight(spec.params, rule)
                     cur_w = (held_qty * last_known_close[sym] / equity) if equity > 0 else 0.0
                     if cur_w < max_w - 1e-6:
-                        pending_signals.append(
+                        new_signals.append(
                             {"symbol": sym, "action": "BUY", "score": sig_out["score"], "reason": sig_out["reason"]}
                         )
+
+        pending_queue.append(new_signals)
 
         for sym in norm_syms:
             bar = bar_map.get((day, sym))
@@ -1518,12 +1610,30 @@ def run_backtest(
         initial_capital=float(initial_capital),
         risk_free_rate=risk_free_rate,
     )
+    benchmark_aligned_metrics = compute_risk_metrics(
+        benchmark_aligned_curve,
+        [],
+        initial_capital=float(initial_capital),
+        risk_free_rate=risk_free_rate,
+    )
 
     assumptions = {
-        "execution_model": "Causal signals evaluated at day_t close execute at day_{t+1} open; sells before buys",
+        "execution_model": (
+            "Signals evaluated at day_t close execute after "
+            f"{execution_delay} trading day(s) at the "
+            f"{'close' if execution == 'next_close' else 'open'}; sells before buys"
+        ),
+        "execution": execution,
         "market": mkt,
         "rules": {sym: market_rules[sym].to_dict() for sym in norm_syms},
-        "benchmark": "Equal-weight buy-and-hold across selected symbols anchored on first trading day",
+        "benchmark": (
+            "Tradable equal-weight buy-and-hold: buys at the first executable open with the same "
+            "slippage, lot size, fee schedule and participation cap as the strategy, holds to the end"
+        ),
+        "benchmark_aligned": (
+            f"Same-exposure benchmark capped at max_weight={aligned_cap:.4f} per symbol, "
+            "otherwise identical to the fully invested benchmark"
+        ),
         "price_limit_note": "CN default +/-10% main-board limit against prior close (override via rules_override)" if mkt == "CN" else "US has no daily price limit",
     }
 
@@ -1538,6 +1648,7 @@ def run_backtest(
         "end_date": end_dt.isoformat(),
         "initial_capital": float(initial_capital),
         "seed": int(seed),
+        "execution": execution,
         "market_rules": {sym: market_rules[sym].to_dict() for sym in norm_syms},
         "bars_count": len(bar_map),
         "equity_curve": equity_curve,
@@ -1562,6 +1673,7 @@ def run_backtest(
         trades=trades,
         metrics=metrics,
         benchmark_metrics=benchmark_metrics,
+        benchmark_aligned_metrics=benchmark_aligned_metrics,
         assumptions=assumptions,
         reproducibility_hash=repro_hash,
     )
@@ -1581,15 +1693,18 @@ def _align_comparison_curves(
     last_eq: dict[str, float] = {sid: init_cap for sid in ordered_ids}
     last_dd: dict[str, float] = {sid: 0.0 for sid in ordered_ids}
     last_bench: float = init_cap
+    last_bench_aligned: float = init_cap
 
     aligned_equity_curves: list[dict[str, Any]] = []
     aligned_drawdown_curves: list[dict[str, Any]] = []
     benchmark_curve: list[dict[str, Any]] = []
+    benchmark_aligned_curve: list[dict[str, Any]] = []
 
     for dt_str in all_dates:
         eq_row: dict[str, Any] = {"date": dt_str}
         dd_row: dict[str, Any] = {"date": dt_str}
         bench_val: float | None = None
+        bench_aligned_val: float | None = None
         for sid in ordered_ids:
             pt = by_sid_date[sid].get(dt_str)
             if pt is not None:
@@ -1607,18 +1722,32 @@ def _align_comparison_curves(
                     and math.isfinite(float(b_v))
                 ):
                     bench_val = float(b_v)
+                ba_v = pt.get("benchmark_aligned_equity")
+                if (
+                    bench_aligned_val is None
+                    and isinstance(ba_v, (int, float))
+                    and not isinstance(ba_v, bool)
+                    and math.isfinite(float(ba_v))
+                ):
+                    bench_aligned_val = float(ba_v)
             eq_row[sid] = last_eq[sid]
             dd_row[sid] = last_dd[sid]
         if bench_val is None:
             bench_val = last_bench
         else:
             last_bench = bench_val
+        if bench_aligned_val is None:
+            bench_aligned_val = last_bench_aligned
+        else:
+            last_bench_aligned = bench_aligned_val
         eq_row["benchmark_equity"] = bench_val
+        eq_row["benchmark_aligned_equity"] = bench_aligned_val
         aligned_equity_curves.append(eq_row)
         aligned_drawdown_curves.append(dd_row)
         benchmark_curve.append({"date": dt_str, "equity": bench_val})
+        benchmark_aligned_curve.append({"date": dt_str, "equity": bench_aligned_val})
 
-    return aligned_equity_curves, aligned_drawdown_curves, benchmark_curve
+    return aligned_equity_curves, aligned_drawdown_curves, benchmark_curve, benchmark_aligned_curve
 
 
 def compare_strategies(
@@ -1669,7 +1798,7 @@ def compare_strategies(
         results[res.strategy_id] = res
 
     first_res = results[ordered_ids[0]]
-    aligned_equity_curves, aligned_drawdown_curves, benchmark_curve = _align_comparison_curves(
+    aligned_equity_curves, aligned_drawdown_curves, benchmark_curve, benchmark_aligned_curve = _align_comparison_curves(
         ordered_ids, results, initial_capital
     )
 
@@ -1707,6 +1836,9 @@ def compare_strategies(
                 "profit_factor": m["profit_factor"],
                 "total_trades": m["total_trades"],
                 "total_fees": m["total_fees"],
+                "fee_drag": m.get("fee_drag"),
+                "gross_return": m.get("gross_return"),
+                "turnover": m.get("turnover"),
             }
         )
 
@@ -1735,6 +1867,107 @@ def compare_strategies(
         aligned_equity_curves=aligned_equity_curves,
         aligned_drawdown_curves=aligned_drawdown_curves,
         benchmark_curve=benchmark_curve,
+        benchmark_aligned_curve=benchmark_aligned_curve,
         trade_logs=trade_logs,
         reproducibility_hash=comp_hash,
     )
+
+
+DEFAULT_FEE_SCENARIOS: tuple[tuple[float, float], ...] = (
+    (0.0003, 5.0),
+    (0.0002, 2.0),
+    (0.0001, 0.0),
+    (0.0, 0.0),
+)
+
+
+def fee_sensitivity(
+    strategy_id: str | StrategySpec,
+    symbols: list[str],
+    start_date: str | date,
+    end_date: str | date,
+    initial_capital: float = 100000.0,
+    scenarios: Any = None,
+    market: str = "CN",
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Run one strategy under several fee scenarios; report gross vs net impact.
+
+    Each scenario is (commission_rate, min_commission). Varying the rate alone is
+    usually meaningless for small tickets because the per-order minimum dominates.
+    """
+    mkt = str(market or "CN").strip().upper()
+    norm = sorted({_normalize_symbol_for_market(s, mkt) for s in symbols if str(s).strip()})
+    pairs = scenarios if scenarios else DEFAULT_FEE_SCENARIOS
+    rows: list[dict[str, Any]] = []
+    for item in pairs:
+        rate, min_commission = float(item[0]), float(item[1])
+        override = {
+            sym: {"commission_rate": rate, "min_commission": min_commission}
+            for sym in norm
+        }
+        res = run_backtest(
+            strategy_id,
+            symbols,
+            start_date,
+            end_date,
+            initial_capital=initial_capital,
+            market=mkt,
+            rules_override=override,
+            **kwargs,
+        )
+        rows.append(
+            {
+                "commission_rate": rate,
+                "min_commission": min_commission,
+                "final_equity": res.final_equity,
+                "total_return": res.metrics.get("total_return"),
+                "gross_return": res.metrics.get("gross_return"),
+                "fee_drag": res.metrics.get("fee_drag"),
+                "total_fees": res.metrics.get("total_fees"),
+                "turnover": res.metrics.get("turnover"),
+                "total_trades": res.metrics.get("total_trades"),
+            }
+        )
+    return rows
+
+
+EXECUTION_MODES: tuple[str, ...] = ("next_open", "next_close", "t2_open")
+
+
+def execution_sensitivity(
+    strategy_id: str | StrategySpec,
+    symbols: list[str],
+    start_date: str | date,
+    end_date: str | date,
+    initial_capital: float = 100000.0,
+    modes: Any = None,
+    market: str = "CN",
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Run one strategy under several execution assumptions and compare outcomes."""
+    mkt = str(market or "CN").strip().upper()
+    rows: list[dict[str, Any]] = []
+    for mode in (modes or EXECUTION_MODES):
+        res = run_backtest(
+            strategy_id,
+            symbols,
+            start_date,
+            end_date,
+            initial_capital=initial_capital,
+            market=mkt,
+            execution=str(mode),
+            **kwargs,
+        )
+        rows.append(
+            {
+                "execution": str(mode),
+                "final_equity": res.final_equity,
+                "total_return": res.metrics.get("total_return"),
+                "max_drawdown": res.metrics.get("max_drawdown"),
+                "sharpe_ratio": res.metrics.get("sharpe_ratio"),
+                "total_trades": res.metrics.get("total_trades"),
+                "total_fees": res.metrics.get("total_fees"),
+            }
+        )
+    return rows

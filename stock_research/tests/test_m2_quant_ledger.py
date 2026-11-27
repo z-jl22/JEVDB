@@ -628,7 +628,7 @@ class TestBacktestDeterminismAndComparison(unittest.TestCase):
                 assumptions={},
                 reproducibility_hash="h2",
             )
-            eq_c, dd_c, b_c = _align_comparison_curves(["s1", "s2"], {"s1": r1, "s2": r2}, 10000.0)
+            eq_c, dd_c, b_c, ba_c = _align_comparison_curves(["s1", "s2"], {"s1": r1, "s2": r2}, 10000.0)
             self.assertEqual(len(eq_c), 4)
             self.assertEqual(len(dd_c), 4)
             self.assertEqual(len(b_c), 4)

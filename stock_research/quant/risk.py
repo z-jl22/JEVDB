@@ -246,6 +246,12 @@ def compute_risk_metrics(
             "total_trades": num_trades,
             "num_closed_trades": num_closed_trades,
             "total_fees": round(total_fees, 2),
+            "gross_return": 0.0,
+            "fee_drag": (
+                round(total_fees / float(initial_capital), 6)
+                if isinstance(initial_capital, (int, float)) and float(initial_capital) > _EPS
+                else 0.0
+            ),
         }
 
     equities = [_safe_float(r.get("equity")) for r in rows]
@@ -336,6 +342,17 @@ def compute_risk_metrics(
     turnover = (total_notional / mean_equity) if mean_equity > _EPS else 0.0
     annualized_turnover = (turnover * trading_days_per_year / max(n - 1, 1)) if turnover > 0.0 else 0.0
 
+    # Cost attribution: gross return before fees, and fees as a share of capital.
+    final_equity = float(equities[-1]) if equities else 0.0
+    gross_equity = final_equity + float(total_fees)
+    cap0 = (
+        float(initial_capital)
+        if isinstance(initial_capital, (int, float)) and float(initial_capital) > _EPS
+        else 0.0
+    )
+    gross_return = (gross_equity / cap0 - 1.0) if cap0 > _EPS else 0.0
+    fee_drag = (float(total_fees) / cap0) if cap0 > _EPS else 0.0
+
     def _clean(val: float, ndigits: int = 6) -> float:
         if not math.isfinite(val):
             return 0.0
@@ -363,6 +380,8 @@ def compute_risk_metrics(
         "total_trades": int(num_trades),
         "num_closed_trades": int(num_closed_trades),
         "total_fees": round(float(total_fees), 2),
+        "gross_return": _clean(gross_return),
+        "fee_drag": _clean(fee_drag),
     }
 
 
