@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.duckdb
+*.duckdb.wal
+*.db
+dist/
+build/
+node_modules/
+.pytest_cache/
+.coverage
+htmlcov/

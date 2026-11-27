@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "stock_research": {
+      "command": "/home/tao/JEVDB/stock_research/.venv/bin/python",
+      "args": ["-m", "stock_research.mcp_server.server"],
+      "cwd": "/home/tao/JEVDB",
+      "exposure": "direct",
+      "timeout": 120,
+      "description": "JEVDB semantic+SQL market research, AkShare/yfinance/SEC EDGAR/Finnhub data ingestion, DuckDuckGo web search/fetch, quant strategy backtest & comparison, portfolio risk analytics, and persistent paper-trading ledger"
+    }
+  }
+}
