@@ -10,7 +10,7 @@
 
 ```text
 /home/tao/JEVDB/
-├── src/, python/, examples/, tools/, docs/, scripts/   # [核心只读] JEVDB 原生 C++ 扩展、Python 封装与静态基线
+├── src/, python/, tools/, docs/, scripts/              # JEVDB 原生 C++ 扩展、Python 封装与工具
 ├── CMakeLists.txt, extension_config.cmake, pyproject.toml, LICENSE
 ├── .pi/                                                # Pi Coding Agent 项目配置与开源 Skills
 │   ├── mcp.json                                        # 注册 stock_research stdio MCP 服务
@@ -134,7 +134,7 @@ cd /home/tao/JEVDB/stock_research/web && npm install && npm run build
 | `STOCK_RESEARCH_DB_PATH` | `<runtime_dir>/market_research.duckdb` | 行情与基本面 DuckDB 主库路径 |
 | `STOCK_RESEARCH_LEDGER_DB_PATH` | `<runtime_dir>/paper_ledger.duckdb` | 模拟交易账本 DuckDB 路径 |
 | `STOCK_RESEARCH_STRATEGY_DIR` | `<runtime_dir>/strategies` | 量化策略 JSON 持久化目录 |
-| `STOCK_RESEARCH_STATIC_EXAMPLES_DIR` | `<repo_root>/examples/stock_trading` | 只读静态基线 CSV 目录 |
+| `STOCK_RESEARCH_BASELINE_DATA_DIR` | `<repo_root>/stock_research/data/baseline` | 只读静态基线 CSV 目录，兼容旧变量 `STOCK_RESEARCH_STATIC_EXAMPLES_DIR` |
 | `JEVDB_MARKET_DB` | 优先于 `STOCK_RESEARCH_DB_PATH` | FastAPI (`stock_research/api/app.py`) 与回测模块直接覆写行情库路径 |
 | `JEVDB_PAPER_LEDGER_DB` | 优先于 `STOCK_RESEARCH_LEDGER_DB_PATH` | `PaperAccountService` (`stock_research/quant/ledger.py`) 直接覆写账本库路径 |
 | `JEVDB_SHIM_HOST` | `127.0.0.1` | 本地 `llm_shim` HTTP 监听地址 |
@@ -173,13 +173,14 @@ cd /home/tao/JEVDB
 VENV_PY=/home/tao/JEVDB/stock_research/.venv/bin/python
 ```
 
-### 4.1 步骤 1：验证 JEVDB 核心静态基线（16 项测试）
+### 4.1 步骤 1：验证静态基线和 JEVDB 语义操作符
 
 确认 `/home/tao/JEVDB` 原生静态功能与语义操作符完好无损：
 
 ```bash
-# 核心股票交易示例测试（预期 11 tests OK）
-$VENV_PY -m unittest discover -s examples/stock_trading -p 'test_*.py' -v
+# 静态基线加载与量化交易测试
+$VENV_PY -m pytest stock_research/tests/test_m1_storage_ingest.py -k static_baseline
+$VENV_PY -m pytest stock_research/tests/test_m2_quant_ledger.py -m 'not live'
 
 # 核心 JEVDB standin 测试（预期 5 tests OK）
 $VENV_PY tools/standin/test_jev_standin.py -v
@@ -187,7 +188,7 @@ $VENV_PY tools/standin/test_jev_standin.py -v
 
 ### 4.2 步骤 2：按需动态数据采集与可选定时监控
 
-外围采集器将 A 股（AkShare）与美股（yfinance / SEC EDGAR / Finnhub）数据写入 DuckDB 动态表，并与 `examples/stock_trading/` 静态基线共存：
+外围采集器将 A 股（AkShare）与美股（yfinance / SEC EDGAR / Finnhub）数据写入 DuckDB 动态表，并与 `stock_research/data/baseline/` 静态基线共存：
 
 ```bash
 # 1. A 股板块行情与成分股（示例：电力行业近 30 天）

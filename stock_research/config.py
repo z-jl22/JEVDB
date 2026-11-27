@@ -6,7 +6,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_REPO_ROOT = Path("/home/tao/JEVDB")
+DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
+BASELINE_DATA_PATH = Path("stock_research/data/baseline")
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-flash"
 
 
 @dataclass(frozen=True)
@@ -17,7 +20,7 @@ class Settings:
     db_path: Path
     ledger_db_path: Path
     strategy_dir: Path
-    static_examples_dir: Path
+    baseline_data_dir: Path
     deepseek_api_key: str
     deepseek_base_url: str
     deepseek_model: str
@@ -46,10 +49,10 @@ def get_settings(ensure_dirs: bool = True) -> Settings:
     strategy_dir = Path(
         os.getenv("STOCK_RESEARCH_STRATEGY_DIR", str(runtime_dir / "strategies"))
     )
-    static_examples_dir = Path(
+    baseline_data_dir = Path(
         os.getenv(
-            "STOCK_RESEARCH_STATIC_EXAMPLES_DIR",
-            str(repo_root / "examples" / "stock_trading"),
+            "STOCK_RESEARCH_BASELINE_DATA_DIR",
+            os.getenv("STOCK_RESEARCH_STATIC_EXAMPLES_DIR", str(repo_root / BASELINE_DATA_PATH)),
         )
     )
 
@@ -66,12 +69,12 @@ def get_settings(ensure_dirs: bool = True) -> Settings:
         db_path=db_path,
         ledger_db_path=ledger_db_path,
         strategy_dir=strategy_dir,
-        static_examples_dir=static_examples_dir,
+        baseline_data_dir=baseline_data_dir,
         deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
         deepseek_base_url=os.getenv(
-            "DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
+            "DEEPSEEK_BASE_URL", DEFAULT_DEEPSEEK_BASE_URL
         ).rstrip("/"),
-        deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-flash").strip(),
+        deepseek_model=os.getenv("DEEPSEEK_MODEL", "").strip() or DEFAULT_DEEPSEEK_MODEL,
         finnhub_api_key=os.getenv("FINNHUB_API_KEY", "").strip(),
         sec_user_agent=os.getenv(
             "SEC_USER_AGENT", "JEVDBStockResearch/0.1 (research@example.org)"

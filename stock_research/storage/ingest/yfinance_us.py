@@ -107,6 +107,12 @@ def _extract_statement_row(df: pd.DataFrame | None, row_names: tuple[str, ...], 
     return None
 
 
+def lookup_us_stock_name(symbol: str) -> str | None:
+    """Resolve the display name from Yahoo Finance's chart metadata."""
+    metadata = yf.Ticker(symbol).get_history_metadata()
+    return str(metadata.get("shortName") or metadata.get("longName") or "").strip() or None
+
+
 def ingest_us_stock(
     symbol: str,
     period: str = "6mo",
@@ -395,7 +401,7 @@ def ingest_us_stock(
                 INSERT INTO assets (symbol, market, name, sector, industry, updated_at)
                 VALUES (?, 'US', ?, ?, ?, ?)
                 ON CONFLICT (symbol, market) DO UPDATE SET
-                    name = COALESCE(NULLIF(excluded.name, ''), assets.name),
+                    name = COALESCE(NULLIF(NULLIF(excluded.name, ''), excluded.symbol), assets.name),
                     sector = COALESCE(NULLIF(excluded.sector, ''), assets.sector),
                     industry = COALESCE(NULLIF(excluded.industry, ''), assets.industry),
                     updated_at = excluded.updated_at

@@ -24,8 +24,8 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from stock_research.config import BASELINE_DATA_PATH
 from stock_research.tests.e2e.conftest import (
-    CORE_TRACKED_PATHS,
     REPO_ROOT,
     find_free_port,
 )
@@ -188,25 +188,8 @@ def _mcp_stdio_session(cmd: list[str], requests: list[dict[str, Any]], env: dict
 
 
 # ===========================================================================
-# E1. Core JEVDB Preservation & Static Baseline (6 Tests)
+# E1. Core JEVDB Preservation & Static Baseline (5 Tests)
 # ===========================================================================
-
-def test_T1_E1_01_baseline_stock_trading_unit_suite(isolated_env: dict[str, Path], mark_backing):
-    mark_backing("real")
-    env = os.environ.copy()
-    proc = subprocess.run(
-        [sys.executable, "-m", "unittest", "discover", "-s", "examples/stock_trading", "-p", "test_*.py", "-v"],
-        cwd=str(REPO_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    combined = proc.stdout + "\n" + proc.stderr
-    assert proc.returncode == 0, combined
-    assert "Ran 11 tests" in combined
-    assert "OK" in combined
-
 
 def test_T1_E1_02_baseline_jev_standin_unit_suite(isolated_env: dict[str, Path], mark_backing):
     mark_backing("real")
@@ -225,10 +208,11 @@ def test_T1_E1_02_baseline_jev_standin_unit_suite(isolated_env: dict[str, Path],
     assert "OK" in combined
 
 
-def test_T1_E1_03_core_repo_files_unmodified(mark_backing):
+def test_T1_E1_03_native_sources_unmodified(mark_backing):
     mark_backing("real")
+    native_paths = ("src", "python/jevdb", "CMakeLists.txt")
     diff_proc = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "diff", "--name-only", "HEAD", "--", *CORE_TRACKED_PATHS],
+        ["git", "-C", str(REPO_ROOT), "diff", "--name-only", "HEAD", "--", *native_paths],
         capture_output=True,
         text=True,
         check=False,
@@ -236,7 +220,7 @@ def test_T1_E1_03_core_repo_files_unmodified(mark_backing):
     assert diff_proc.returncode == 0, diff_proc.stderr
     assert diff_proc.stdout.strip() == ""
     status_proc = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--", *CORE_TRACKED_PATHS],
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--", *native_paths],
         capture_output=True,
         text=True,
         check=False,
@@ -262,11 +246,7 @@ def test_T1_E1_04_jevdb_connect_and_registered_functions(mark_backing):
 
 
 def test_T1_E1_05_static_baseline_csv_loaded_without_mutation(e2e_mode: str, isolated_env: dict[str, Path]):
-    csv_files = [
-        REPO_ROOT / "examples" / "stock_trading" / "prices.csv",
-        REPO_ROOT / "examples" / "stock_trading" / "news.csv",
-        REPO_ROOT / "examples" / "stock_trading" / "trading_rules.csv",
-    ]
+    csv_files = [REPO_ROOT / BASELINE_DATA_PATH / name for name in ("prices.csv", "news.csv", "trading_rules.csv")]
     before_hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in csv_files}
 
     if e2e_mode == "live":

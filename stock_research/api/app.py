@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 
 import anyio
 import duckdb
@@ -20,12 +21,13 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, BeforeValidator, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, SecretStr, field_validator, model_validator
 
 from stock_research.agent.pi_runner import run_research_query
 from stock_research.config import get_settings
 from stock_research.quant.backtest import (
     _to_date as _backtest_to_date,
+    classify_news_sentiment,
     compare_strategies,
     load_bars_from_duckdb,
     run_backtest,
@@ -40,8 +42,11 @@ from stock_research.quant.strategies import (
     save_strategy,
 )
 from stock_research.storage.ingest.akshare_cn import (
+    SectorMatchError,
     ingest_a_share_sector,
     ingest_a_share_stock,
+    lookup_cn_stock_name,
+    match_sector_name,
     normalize_cn_symbol,
 )
 from stock_research.storage.ingest.finnhub_us import (
@@ -49,7 +54,8 @@ from stock_research.storage.ingest.finnhub_us import (
     ingest_finnhub_news,
 )
 from stock_research.storage.ingest.sec_edgar import ingest_sec_edgar
-from stock_research.storage.ingest.yfinance_us import ingest_us_stock
+from stock_research.storage.ingest.yfinance_us import ingest_us_stock, lookup_us_stock_name
+from stock_research.storage.news_sentiment import analyze_stock_news
 from stock_research.storage.schema import db_session, ensure_baseline_seeded
 
 _MARKET_DB_LOCK = threading.RLock()
@@ -226,7 +232,49 @@ def _auto_fetch_missing_bars_for_window(
 # ---------------------------------------------------------------------------
 
 
-class AgentQueryRequest(BaseModel):
+class ModelConnectionRequest(BaseModel):
+    base_url: str | None = None
+    api_key: SecretStr | None = None
+    model: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, value: str | None) -> str | None:
+        url = (value or "").strip().rstrip("/")
+        if not url:
+            return None
+        try:
+            parts = urlsplit(url)
+            if (
+                parts.scheme in {"http", "https"}
+                and parts.hostname
+                and parts.port != 0
+                and parts.username is None
+                and "?" not in url
+                and "#" not in url
+                and "\\" not in url
+                and not any(char.isspace() or ord(char) < 32 for char in url)
+            ):
+                return url
+        except ValueError:
+            pass
+        raise ValueError("请输入有效的 HTTP 或 HTTPS Base URL，例如 https://api.deepseek.com/v1。")
+
+    @field_validator("model")
+    @classmethod
+    def _validate_model(cls, value: str | None) -> str | None:
+        model = (value or "").strip()
+        if model and not model.isprintable():
+            raise ValueError("Model ID 不能包含控制字符。")
+        return model or None
+
+    def connection_overrides(self) -> dict[str, str]:
+        key = self.api_key.get_secret_value().strip() if self.api_key else ""
+        options = {"base_url": self.base_url, "api_key": key, "model": self.model}
+        return {name: value for name, value in options.items() if value}
+
+
+class AgentQueryRequest(ModelConnectionRequest):
     prompt: str
     mode: str = "auto"
     session_id: str | None = None
@@ -262,6 +310,8 @@ class MarketIngestRequest(BaseModel):
     category: str = "general"
     force: bool = False
     top_constituents: _StrictInt = Field(default=5, ge=1, le=30)
+    analyze_news: bool = False
+    news_connection: ModelConnectionRequest | None = None
 
     @model_validator(mode="after")
     def _validate_kind_fields(self) -> "MarketIngestRequest":
@@ -556,9 +606,13 @@ def create_app() -> FastAPI:
     async def validation_exception_handler(
         _request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        errors = exc.errors()
+        if _request.url.path.startswith("/api/agent/") or _request.url.path == "/api/market/ingest":
+            for error in errors:
+                error.pop("input", None)
         return JSONResponse(
             status_code=422,
-            content={"detail": _json_safe(exc.errors())},
+            content={"detail": _json_safe(errors)},
         )
 
     # ---- Health & Misc ----
@@ -577,6 +631,15 @@ def create_app() -> FastAPI:
 
     # ---- Agent Research Endpoints ----
 
+    @application.get("/api/agent/settings")
+    def api_agent_settings() -> dict[str, str | bool]:
+        settings = get_settings(ensure_dirs=False)
+        return {
+            "base_url": settings.deepseek_base_url,
+            "has_api_key": bool(settings.deepseek_api_key),
+            "model": settings.deepseek_model,
+        }
+
     @application.post("/api/agent/query")
     async def api_agent_query(req: AgentQueryRequest) -> JSONResponse:
         def _run() -> dict[str, Any]:
@@ -584,6 +647,7 @@ def create_app() -> FastAPI:
                 prompt=req.prompt,
                 mode=req.mode,
                 session_id=req.session_id,
+                **req.connection_overrides(),
             )
 
         try:
@@ -605,7 +669,10 @@ def create_app() -> FastAPI:
         clean_prompt = str(prompt or "").strip()
         if not clean_prompt:
             raise HTTPException(status_code=422, detail="Research prompt must be non-empty")
+        return await api_agent_stream_post(AgentQueryRequest(prompt=clean_prompt, mode=mode, session_id=session_id))
 
+    @application.post("/api/agent/stream")
+    async def api_agent_stream_post(req: AgentQueryRequest) -> StreamingResponse:
         queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -617,10 +684,11 @@ def create_app() -> FastAPI:
         def _worker() -> None:
             try:
                 run_research_query(
-                    prompt=clean_prompt,
-                    mode=mode,
-                    session_id=session_id,
+                    prompt=req.prompt,
+                    mode=req.mode,
+                    session_id=req.session_id,
                     on_event=_on_event,
+                    **req.connection_overrides(),
                 )
             except Exception as exc:
                 err_payload = _json_safe(
@@ -669,15 +737,63 @@ def create_app() -> FastAPI:
         symbol: str = Query(..., min_length=1),
         market: str | None = Query(None),
         days: int = Query(120, ge=1, le=3650),
+        fetch_missing: bool = Query(False),
     ) -> JSONResponse:
         if not symbol.strip():
             raise HTTPException(status_code=422, detail="symbol must be non-empty")
         mkt = market.strip().upper() if (market and market.strip()) else None
         sym, inferred_mkt = _normalize_market_symbol(symbol, mkt)
+        db_path = _resolve_market_db_path()
         with _MARKET_DB_LOCK:
-            with db_session(_resolve_market_db_path()) as con:
+            with db_session(db_path) as con:
                 _ensure_baseline_seeded(con)
                 bars = load_bars_from_duckdb([sym], market=mkt, con=con)
+                asset = con.execute(
+                    "SELECT NULLIF(NULLIF(TRIM(name), ''), symbol) FROM assets WHERE symbol = ? AND market = ?",
+                    [sym, inferred_mkt],
+                ).fetchone()
+        name = asset[0] if asset else None
+        if fetch_missing and len(bars) < days and inferred_mkt in {"CN", "US"}:
+            # Fetch outside the database lock so other views remain responsive.
+            try:
+                if inferred_mkt == "CN":
+                    ingest_a_share_stock(
+                        symbol=sym, days=days, db_path=db_path,
+                        include_fundamentals=False, include_news=False,
+                    )
+                else:
+                    start_date = date.today() - timedelta(days=days * 2)
+                    ingest_us_stock(
+                        symbol=sym, start_date=start_date, db_path=db_path,
+                        include_fundamentals=False, include_news=False,
+                    )
+            except (ValueError, RuntimeError) as exc:
+                if not bars:
+                    raise HTTPException(status_code=503, detail="日线拉取失败，请核对股票代码和市场后重试。") from exc
+            else:
+                with _MARKET_DB_LOCK:
+                    with db_session(db_path) as con:
+                        bars = load_bars_from_duckdb([sym], market=inferred_mkt, con=con)
+        if fetch_missing and bars and not name and inferred_mkt in {"CN", "US"}:
+            lookup_name = lookup_cn_stock_name if inferred_mkt == "CN" else lookup_us_stock_name
+            try:
+                name = lookup_name(sym)
+            except Exception:
+                # The optional name lookup should not hide available bars.
+                name = None
+            if name:
+                with _MARKET_DB_LOCK:
+                    with db_session(db_path) as con:
+                        con.execute(
+                            """
+                            INSERT INTO assets (symbol, market, name, updated_at)
+                            VALUES (?, ?, ?, current_timestamp)
+                            ON CONFLICT (symbol, market) DO UPDATE SET
+                                name = excluded.name, updated_at = excluded.updated_at
+                            WHERE NULLIF(NULLIF(TRIM(assets.name), ''), assets.symbol) IS NULL
+                            """,
+                            [sym, inferred_mkt, name],
+                        )
         if len(bars) > days:
             bars = bars[-days:]
         formatted = [
@@ -695,7 +811,7 @@ def create_app() -> FastAPI:
             }
             for b in bars
         ]
-        return JSONResponse(_json_safe({"symbol": sym, "market": inferred_mkt, "bars": formatted}))
+        return JSONResponse(_json_safe({"symbol": sym, "name": name, "market": inferred_mkt, "bars": formatted}))
 
     @application.get("/api/market/sector")
     def api_market_sector(
@@ -711,13 +827,25 @@ def create_app() -> FastAPI:
         with _MARKET_DB_LOCK:
             with db_session(_resolve_market_db_path()) as con:
                 _ensure_baseline_seeded(con)
+                names = con.execute(
+                    "SELECT sector_name FROM sector_snapshots UNION SELECT sector_name FROM sector_constituents"
+                ).fetchall()
+                matched, suggestions = match_sector_name(sec_name, [row[0] for row in names])
+                if matched is None:
+                    return JSONResponse({
+                        "sector": sec_name,
+                        "match_status": "suggestions" if suggestions else "unmatched",
+                        "suggestions": suggestions,
+                        "snapshots": [],
+                        "constituents": [],
+                    })
                 snap_cur = con.execute(
                     """
                     SELECT market, sector_name, sector_code,
                            CAST(trade_date AS VARCHAR) AS trade_date,
                            change_pct, volume, turnover, leader_symbol, payload_json, source
                     FROM sector_snapshots
-                    WHERE sector_name ILIKE ?
+                    WHERE sector_name = ?
                     QUALIFY ROW_NUMBER() OVER (
                         PARTITION BY market, sector_name, trade_date
                         ORDER BY CASE source
@@ -729,7 +857,7 @@ def create_app() -> FastAPI:
                     ORDER BY trade_date DESC
                     LIMIT ?
                     """,
-                    [f"%{sec_name}%", limit],
+                    [matched, limit],
                 )
                 snapshots = _rows_to_dicts(snap_cur.description, snap_cur.fetchall())
 
@@ -738,7 +866,7 @@ def create_app() -> FastAPI:
                     SELECT sector_name, symbol, name, price, change_pct, pe, pb, market_cap,
                            CAST(updated_at AS VARCHAR) AS updated_at, source
                     FROM sector_constituents
-                    WHERE sector_name ILIKE ?
+                    WHERE sector_name = ?
                     QUALIFY ROW_NUMBER() OVER (
                         PARTITION BY sector_name, symbol
                         ORDER BY updated_at DESC NULLS LAST
@@ -746,13 +874,15 @@ def create_app() -> FastAPI:
                     ORDER BY change_pct DESC NULLS LAST, symbol ASC
                     LIMIT ?
                     """,
-                    [f"%{sec_name}%", limit],
+                    [matched, limit],
                 )
                 constituents = _rows_to_dicts(const_cur.description, const_cur.fetchall())
         return JSONResponse(
             _json_safe(
                 {
-                    "sector": sec_name,
+                    "sector": matched,
+                    "match_status": "matched",
+                    "suggestions": [],
                     "snapshots": snapshots,
                     "constituents": constituents,
                 }
@@ -852,13 +982,13 @@ def create_app() -> FastAPI:
         params: list[Any] = []
         mkt = market.strip().upper() if (market and market.strip()) else None
         if symbol and symbol.strip():
-            clauses.append("UPPER(symbol) = ?")
+            clauses.append("UPPER(n.symbol) = ?")
             params.append(_normalize_symbol_for_market(symbol, mkt))
         if sector and sector.strip():
-            clauses.append("sector ILIKE ?")
+            clauses.append("n.sector ILIKE ?")
             params.append(f"%{sector.strip()}%")
         if mkt:
-            clauses.append("UPPER(market) = ?")
+            clauses.append("UPPER(n.market) = ?")
             params.append(mkt)
         where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
@@ -868,17 +998,25 @@ def create_app() -> FastAPI:
                 _ensure_baseline_seeded(con)
                 cur = con.execute(
                     f"""
-                    SELECT event_id, symbol, market, sector,
-                           CAST(published_at AS VARCHAR) AS published_at,
-                           title, summary, url, source, sentiment_label, keywords_json
-                    FROM news_events
+                    SELECT n.event_id, n.symbol, n.market, n.sector,
+                           CAST(n.published_at AS VARCHAR) AS published_at,
+                           n.title, n.summary, n.url, n.source, n.sentiment_label, n.keywords_json,
+                           a.sentiment AS analyzed_sentiment
+                    FROM news_events n
+                    LEFT JOIN news_sentiment_analysis a ON a.event_id = n.event_id
+                        AND a.market = n.market AND a.symbol = n.symbol
+                        AND a.title IS NOT DISTINCT FROM n.title AND a.summary IS NOT DISTINCT FROM n.summary
                     {where_sql}
-                    ORDER BY published_at DESC NULLS LAST
+                    ORDER BY n.published_at DESC NULLS LAST, n.event_id
                     LIMIT ?
                     """,
                     params,
                 )
                 news = _rows_to_dicts(cur.description, cur.fetchall())
+        for item in news:
+            analyzed = item.pop("analyzed_sentiment")
+            item["sentiment"] = analyzed or classify_news_sentiment(item)
+            item["sentiment_source"] = "model" if analyzed else ("stored" if item["sentiment_label"] else "keyword")
         return JSONResponse(_json_safe({"news": news}))
 
     @application.post("/api/market/ingest")
@@ -902,11 +1040,16 @@ def create_app() -> FastAPI:
                         force=req.force,
                     )
                 elif req.kind == "us_stock":
+                    # Explicit periods keep the existing API behavior. The workbench sends days.
+                    date_range = {}
+                    if "days" in req.model_fields_set and "period" not in req.model_fields_set:
+                        date_range["start_date"] = date.today() - timedelta(days=req.days * 2)
                     res = ingest_us_stock(
                         symbol=req.symbol or "",
                         period=req.period,
                         db_path=db_path,
                         force=req.force,
+                        **date_range,
                     )
                 elif req.kind == "sec_edgar":
                     res = ingest_sec_edgar(
@@ -932,7 +1075,14 @@ def create_app() -> FastAPI:
                     )
                 else:
                     raise ValueError(f"Unsupported ingest kind: {req.kind}")
+            if req.analyze_news and req.kind in {"a_share_stock", "us_stock"}:
+                market = "CN" if req.kind == "a_share_stock" else "US"
+                symbol, _ = _normalize_market_symbol(req.symbol or "", market)
+                overrides = req.news_connection.connection_overrides() if req.news_connection else {}
+                res["news_analysis"] = analyze_stock_news(db_path, market, symbol, **overrides)
             return JSONResponse(_json_safe(res))
+        except SectorMatchError as exc:
+            return JSONResponse({"sector": req.sector, "match_status": "suggestions", "suggestions": exc.candidates})
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except RuntimeError as exc:

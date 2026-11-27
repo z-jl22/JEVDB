@@ -32,6 +32,56 @@ export interface AgentQueryResponse {
   answer: string;
   sources: string[];
   duration_ms: number;
+  connection?: AgentConnection;
+}
+
+export interface AgentSettings {
+  base_url: string;
+  has_api_key: boolean;
+  model: string;
+}
+
+export type AgentConnection = Pick<AgentSettings, "base_url" | "model">;
+export type ModelConnectionOptions = Partial<AgentConnection> & { api_key?: string };
+
+export interface AgentQueryRequest extends ModelConnectionOptions {
+  prompt: string;
+  mode: string;
+}
+
+export async function* agentEvents(request: AgentQueryRequest, signal: AbortSignal) {
+  const res = await fetch("/api/agent/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+    body: JSON.stringify(request),
+    signal,
+  });
+  if (!res.ok || !res.body || !res.headers.get("Content-Type")?.includes("text/event-stream")) {
+    throw new Error("无法建立 Agent 实时连接");
+  }
+
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += value;
+      // The API writes each event as an LF-delimited frame with one JSON data line.
+      let end = buffer.indexOf("\n\n");
+      while (end !== -1) {
+        const [event, data] = buffer.slice(0, end).split("\n");
+        buffer = buffer.slice(end + 2);
+        end = buffer.indexOf("\n\n");
+        if (event?.startsWith("event: ") && data?.startsWith("data: ")) {
+          yield { name: event.slice(7), data: JSON.parse(data.slice(6)) as unknown };
+        }
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
 }
 
 export interface MarketBar {
@@ -47,16 +97,10 @@ export interface MarketBar {
   source?: string | null;
 }
 
-export interface SectorSnapshot {
-  market: string;
-  sector_name: string;
-  sector_code?: string | null;
-  trade_date: string;
-  change_pct?: number | null;
-  volume?: number | null;
-  turnover?: number | null;
-  leader_symbol?: string | null;
-  source?: string | null;
+export interface MarketBarsResponse {
+  symbol: string;
+  name: string | null;
+  bars: MarketBar[];
 }
 
 export interface SectorConstituent {
@@ -108,6 +152,8 @@ export interface NewsItem {
   url?: string | null;
   source?: string | null;
   sentiment_label?: string | null;
+  sentiment?: "positive" | "negative" | "neutral" | "insufficient";
+  sentiment_source?: "model" | "stored" | "keyword";
 }
 
 export interface StrategySpec {
@@ -329,6 +375,16 @@ export function formatNumber(val: number | null | undefined, digits = 2): string
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
+}
+
+export function isSafeHttpUrl(raw: string | null | undefined): raw is string {
+  if (!raw) return false;
+  try {
+    const { protocol } = new URL(raw.trim());
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export function formatPct(val: number | null | undefined, digits = 2): string {

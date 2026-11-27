@@ -4,14 +4,12 @@
 
 ---
 
-## 1. 总体变更概览（合并零冲突保证）
+## 1. 总体变更概览
 
 - **基线分支**：`origin/main` (`64cf312`, *"Modify the config"*)
 - **开发分支**：`feat/stock-research-platform`
-- **原版文件改动数**：**`0` 个文件修改、`0` 行删除**
-  - 原版核心 C++ / Python 源码与配置文件（`src/`、`python/`、`examples/`、`tools/`、`docs/`、`scripts/`、`.github/`、`CMakeLists.txt`、`extension_config.cmake`、`pyproject.toml`、`README.md`、`.gitignore`、`LICENSE`）保持 **100% 原样不变**。
-  - 原版既有测试基线（`examples/stock_trading/test_trade.py` 11 项 + `tools/standin/test_jev_standin.py` 5 项 = **16 项**）全部完整通过。
-- **新增目录范围**（纯外围增量扩展，合并至 `main` 时不会与原版产生任何文件级冲突）：
+- **示例目录调整**：工作台使用的三个 CSV 位于 `stock_research/data/baseline/`。Python 包和可选 scorer 构建所需的测试用资源位于 `tools/fixtures/`。
+- **应用目录**：
   1. `.pi/` — `pi coding agent` 项目级 MCP 服务注册与 4 套开源投研 Skills（5 个文件）
   2. `stock_research/` — 外围股票研究与模拟交易系统全部后端、Agent、MCP、量化、前端与测试代码（57 个文件）
   3. `docs_project/` — 运维手册、项目设计与组件合规审查文档、以及本变更总结（3 个文件）
@@ -56,7 +54,7 @@
 | 文件路径 | 行数 | 模块归属 / 作用 |
 |---|---:|---|
 | `stock_research/storage/__init__.py` | 20 | 存储层公共导出 |
-| `stock_research/storage/schema.py` | 477 | DuckDB 表结构（`assets`、`market_bars`、`sector_snapshots`、`sector_constituents`、`fundamentals`、`edgar_filings`、`news_events`、`strategies`、`ingestion_runs`）、静态示例基线加载（只读引用 `examples/stock_trading/`）与非 TTY 进度条禁用 |
+| `stock_research/storage/schema.py` | 477 | DuckDB 表结构（`assets`、`market_bars`、`sector_snapshots`、`sector_constituents`、`fundamentals`、`edgar_filings`、`news_events`、`strategies`、`ingestion_runs`）、静态基线加载（读取 `stock_research/data/baseline/`）与非 TTY 进度条禁用 |
 | `stock_research/storage/llm_shim.py` | 563 | 本地 OpenAI 兼容 HTTP Shim，桥接原生 JEVDB 语义算子（`jev_holds` / `jev_score` / `jev_choose` / `jev_probability`）至 DeepSeek `deepseek-flash`（含离线 mock 模式） |
 | `stock_research/storage/jevdb_bridge.py` | 579 | 联合查询桥接层：融合原版静态基线与动态采集数据，支持 SBF 布隆剪枝（`jev_keys_overlap`）与 JEVDB 语义查询 |
 | `stock_research/storage/ingest/__init__.py` | 169 | 采集公共工具（幂等事件 ID、关键词提取、JSON 缓存、重试与入库记录） |
@@ -153,7 +151,7 @@
 
 ## 3. 合并到 `main` 的注意事项
 
-1. **无冲突直接合并**：由于本分支未修改原版 `main` 中的任何既有文件，可直接使用标准 `git merge feat/stock-research-platform` 或在 GitHub 上发起 Pull Request 合并至 `main`，不会产生任何代码冲突。
+1. **合并检查**：合并时检查静态数据、测试资源的路径以及根目录运行说明。
 2. **首次拉取后的环境构建**（以下运行期目录均已通过 `.gitignore` 排除，未入库）：
    - Python 外围依赖：在保留原生 `duckdb==1.4.3` 与 `jevdb==0.1.0` 的前提下安装 `stock_research/pyproject.toml` 依赖；
    - Node / Pi 与前端构建：在 `stock_research/` 安装 `pi coding agent`，并在 `stock_research/web/` 执行 `npm install && npm run build` 生成 `dist/` 静态资源；

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { apiJson, type HealthResponse } from "./api";
+import { apiJson, type HealthResponse, type ModelConnectionOptions } from "./api";
 import AgentWorkspace from "./components/AgentWorkspace";
 import MarketView from "./components/MarketView";
 import QuantView from "./components/QuantView";
@@ -17,6 +17,7 @@ const TABS: Array<{ id: TabId; label: string }> = [
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("agent");
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [modelConnection, setModelConnection] = useState<ModelConnectionOptions>({});
 
   const sectionRefs = {
     agent: useRef<HTMLElement | null>(null),
@@ -88,7 +89,7 @@ export default function App() {
             </h2>
             <span className="muted">端到端流程：用户需求 → 工具调用 → 核验分析 → 依据展示</span>
           </div>
-          <AgentWorkspace />
+          <AgentWorkspace onConnectionChange={setModelConnection} />
         </section>
 
         <section
@@ -103,7 +104,7 @@ export default function App() {
             </h2>
             <span className="muted">支持按需抓取 A 股 / 美股日线、财务估值、行业成分股与公告</span>
           </div>
-          <MarketView />
+          <MarketView modelConnection={modelConnection} />
         </section>
 
         <section

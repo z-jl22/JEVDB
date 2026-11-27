@@ -18,7 +18,9 @@ import os
 from pathlib import Path
 import re
 import statistics
-from typing import Any
+from typing import Any, Literal
+
+from stock_research.config import get_settings
 
 from .risk import compute_risk_metrics
 from .strategies import (
@@ -376,7 +378,7 @@ def _normalize_symbol_for_market(symbol: str, market: str | None = None) -> str:
 
 
 def load_bars_from_csv(path: str | Path, symbols: list[str] | None = None) -> list[dict[str, Any]]:
-    """Load daily OHLCV bars from a CSV file (compatible with examples/stock_trading/prices.csv)."""
+    """Load daily OHLCV bars from a CSV file in the baseline data format."""
     csv_path = Path(path)
     if not csv_path.exists():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
@@ -728,7 +730,7 @@ def _normalize_bars(
                 finally:
                     tmp_con.close()
         if not raw_rows and db_path is None and con is None:
-            fallback_csv = Path(__file__).resolve().parents[2] / "examples" / "stock_trading" / "prices.csv"
+            fallback_csv = get_settings(ensure_dirs=False).baseline_data_dir / "prices.csv"
             if fallback_csv.exists():
                 raw_rows = load_bars_from_csv(fallback_csv, symbols=symbols)
     else:
@@ -802,22 +804,23 @@ def _normalize_fundamentals(
     return by_sym
 
 
-def _news_sentiment_value(item: dict[str, Any]) -> int:
+def classify_news_sentiment(item: dict[str, Any]) -> Literal["positive", "negative", "neutral"]:
+    """Use a known label when present, otherwise compare keyword matches in the news text."""
     label = str(item.get("sentiment_label") or item.get("impact") or "").strip().lower()
     if label in {"positive", "pos", "bullish", "1", "+1"}:
-        return 1
+        return "positive"
     if label in {"negative", "neg", "bearish", "-1"}:
-        return -1
+        return "negative"
     if label in {"neutral", "neu", "0"}:
-        return 0
+        return "neutral"
     text = f"{item.get('title', '')} {item.get('summary', '')} {item.get('body', '')}".lower()
     pos_hits = sum(1 for kw in _POSITIVE_KEYWORDS if kw in text)
     neg_hits = sum(1 for kw in _NEGATIVE_KEYWORDS if kw in text)
     if pos_hits > neg_hits:
-        return 1
+        return "positive"
     if neg_hits > pos_hits:
-        return -1
-    return 0
+        return "negative"
+    return "neutral"
 
 
 def _normalize_news(
@@ -825,6 +828,7 @@ def _normalize_news(
     market: str | None = None,
 ) -> dict[str, list[tuple[date, int]]]:
     by_sym: dict[str, list[tuple[date, int]]] = {}
+    scores = {"positive": 1, "negative": -1, "neutral": 0}
     for item in news or []:
         sym = _normalize_symbol_for_market(str(item.get("symbol") or ""), market)
         pub_raw = item.get("published_at") or item.get("date")
@@ -833,7 +837,7 @@ def _normalize_news(
         pub_dt = _to_date_or_none(pub_raw)
         if pub_dt is None:
             continue
-        by_sym.setdefault(sym, []).append((pub_dt, _news_sentiment_value(item)))
+        by_sym.setdefault(sym, []).append((pub_dt, scores[classify_news_sentiment(item)]))
     for sym in by_sym:
         by_sym[sym].sort(key=lambda pair: pair[0])
     return by_sym

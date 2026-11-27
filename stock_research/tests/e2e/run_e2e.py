@@ -13,10 +13,9 @@ import sys
 import time
 from uuid import uuid4
 
-from stock_research.tests.e2e.conftest import DEFAULT_SCRATCH_BASE, resolve_e2e_mode
+from stock_research.tests.e2e.conftest import DEFAULT_SCRATCH_BASE, REPO_ROOT, resolve_e2e_mode
 
 E2E_DIR = Path(__file__).resolve().parent
-REPO_ROOT = Path("/home/tao/JEVDB")
 
 
 def build_marker_expr(tier: str, include_self: bool, no_live_network: bool) -> str:

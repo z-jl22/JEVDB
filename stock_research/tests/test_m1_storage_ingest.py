@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import akshare as ak
+import httpx
 import jevdb
 import pandas as pd
 import pytest
@@ -1062,12 +1063,26 @@ def test_akshare_sector_cache_duckdb_and_fundamentals_fallback(
 
     # 1. Initial live success populates disk cache + DuckDB
     detail_calls = {"n": 0}
+    quote_batches = []
+
+    def quote_response(url: str, **kwargs: Any) -> httpx.Response:
+        tickers = url.split("q=", 1)[1].split(",")
+        quote_batches.append(tickers)
+        records = []
+        for ticker in tickers:
+            fields = [""] * 40
+            fields[2], fields[3], fields[32] = ticker[2:], "29.1", "0"
+            fields[39] = "-12.3" if ticker == "sh600900" else ""
+            records.append(f'v_{ticker}="{"~".join(fields)}";')
+        return httpx.Response(200, content="\n".join(records).encode("gbk"), request=httpx.Request("GET", url))
+
+    monkeypatch.setattr("stock_research.storage.ingest.akshare_cn.httpx.get", quote_response)
 
     def ok_detail(sector: str) -> pd.DataFrame:
         detail_calls["n"] += 1
         return pd.DataFrame(
             [
-                {"symbol": "sh600900", "code": "600900", "name": "长江电力", "trade": 28.3, "changepercent": 0.5, "per": 20.0, "pb": 3.0, "mktcap": 70000000.0},
+                {"symbol": "sh600900", "code": "600900", "name": "长江电力", "trade": 28.3, "changepercent": 0.5, "per": None, "pb": 3.0, "mktcap": 70000000.0},
                 {"symbol": "sh600011", "code": "600011", "name": "华能国际", "trade": 7.8, "changepercent": 1.1, "per": 11.0, "pb": 1.8, "mktcap": 12000000.0},
             ]
         )
@@ -1076,7 +1091,13 @@ def test_akshare_sector_cache_duckdb_and_fundamentals_fallback(
     res1 = ingest_a_share_sector("电力", days=5, db_path=db_path, top_constituents=1)
     assert res1["constituents"] == 2
     assert res1["bars"] == 1
+    assert res1["missing_constituent_quotes"] == 0
     assert detail_calls["n"] == 1
+    assert quote_batches == [["sh600900"]]
+    with db_session(db_path, init=False) as con:
+        assert con.execute(
+            "SELECT price, change_pct, pe FROM sector_constituents WHERE symbol = '600900'"
+        ).fetchone() == (28.3, 0.5, -12.3)
 
     # 2. Timeout on force=True falls back to stale disk cache (avoiding 0 constituents)
     monkeypatch.setattr("stock_research.storage.ingest.time.sleep", lambda _s: None)
@@ -1116,11 +1137,16 @@ def test_akshare_sector_cache_duckdb_and_fundamentals_fallback(
     res3b = ingest_a_share_sector("电力", days=5, db_path=cold_db, top_constituents=1, force=True)
     assert res3b["constituents"] == 2
     assert res3b["bars"] == 1
+    assert res3b["missing_constituent_quotes"] == 1
+    assert set(quote_batches[-1]) == {"sh600900", "sh600011"}
     with db_session(cold_db, init=False) as con:
         sw_src = con.execute(
             "SELECT DISTINCT source FROM sector_constituents WHERE sector_name='电力'"
         ).fetchall()
         assert sw_src == [("akshare_sw",)]
+        assert con.execute(
+            "SELECT symbol, price, change_pct, pe FROM sector_constituents ORDER BY symbol"
+        ).fetchall() == [("600011", 29.1, 0.0, None), ("600900", 29.1, 0.0, -12.3)]
 
     # 4. Fundamentals: skipped first row with bad REPORT_DATE still attaches pe_ttm/pb to first valid row
     monkeypatch.setattr(

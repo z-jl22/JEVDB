@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from datetime import date, datetime, timedelta
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
 import akshare as ak
+import httpx
 import pandas as pd
 
 from stock_research.storage.ingest import (
@@ -157,30 +160,77 @@ def normalize_cn_symbol(symbol: str) -> tuple[str, str, str]:
     return code6, f"{exch}{code6}", f"{code6}.{exch.upper()}"
 
 
+class SectorMatchError(ValueError):
+    def __init__(self, candidates: list[str]) -> None:
+        self.candidates = candidates
+        super().__init__("请从候选中选择具体的行业板块。")
+
+
+def _sector_text(name: str) -> str:
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", name)).casefold()
+
+
+def _sector_key(name: str) -> str:
+    text = _sector_text(name).removeprefix("a股")
+    return re.sub(r"\(?(?:行业板块|行业指数|行业|板块)\)?$", "", text)
+
+
+def _known_sector(name: str) -> dict[str, str] | None:
+    key = _sector_key(name)
+    for alias, mapping in _KNOWN_SECTORS.items():
+        if key and key in {_sector_key(value) for value in (alias, *mapping.values())}:
+            return mapping
+    return None
+
+
+def match_sector_name(query: str, names: list[str]) -> tuple[str | None, list[str]]:
+    """Resolve exact, alias and unique substring matches. Suggest uncertain matches."""
+    choices = sorted({name.strip() for name in names if name and name.strip()})
+    exact = [name for name in choices if _sector_text(name) == _sector_text(query)]
+    if len(exact) == 1:
+        return exact[0], []
+    key = _sector_key(query)
+    if not key:
+        return None, []
+    known = _known_sector(query)
+    if known and known["ths_name"] in choices:
+        return known["ths_name"], []
+    if known:
+        key = _sector_key(known["ths_name"])
+    exact = [name for name in choices if _sector_key(name) == key]
+    matches = exact or [name for name in choices if key in _sector_key(name)]
+    if len(matches) == 1 and (exact or len(key) >= 2):
+        return matches[0], []
+    if matches:
+        return None, matches[:5]
+    if len(key) >= 2:
+        keys = get_close_matches(key, [_sector_key(name) for name in choices], n=5, cutoff=0.66)
+        return None, [name for name in choices if _sector_key(name) in keys][:5]
+    return None, []
+
+
 def resolve_cn_sector(sector: str) -> dict[str, str]:
     """Resolve an A-share sector query to THS name and Sina sector label/name."""
     raw = str(sector or "").strip()
     if not raw:
         raise ValueError("Sector cannot be empty")
-    if raw in _KNOWN_SECTORS:
-        return dict(_KNOWN_SECTORS[raw])
+    known = _known_sector(raw)
+    if known:
+        return dict(known)
 
-    ths_name = raw.removesuffix("行业") if raw.endswith("行业") else raw
+    ths_name = _sector_key(raw) or raw
     sina_name = raw if raw.endswith("行业") else f"{raw}行业"
     sina_label = ""
+    ths_match = None
+    suggestions = []
 
     try:
         ths_df = retry_call(ak.stock_board_industry_summary_ths, retries=1, backoff=0.5)
         if ths_df is not None and not ths_df.empty and "板块" in ths_df.columns:
             names = [str(x).strip() for x in ths_df["板块"].tolist()]
-            if raw in names:
-                ths_name = raw
-            elif ths_name in names:
-                pass
-            else:
-                match = next((n for n in names if ths_name in n or n in raw), None)
-                if match:
-                    ths_name = match
+            ths_match, suggestions = match_sector_name(raw, names)
+            if ths_match:
+                ths_name = ths_match
     except Exception:
         pass
 
@@ -189,29 +239,43 @@ def resolve_cn_sector(sector: str) -> dict[str, str]:
             lambda: ak.stock_sector_spot(indicator="新浪行业"), retries=1, backoff=0.5
         )
         if sina_df is not None and not sina_df.empty:
-            for _, row in sina_df.iterrows():
-                lbl = str(row.get("label") or "").strip()
-                name = str(row.get("板块") or "").strip()
-                if raw in (lbl, name) or ths_name == name.removesuffix("行业"):
-                    sina_label = lbl
-                    sina_name = name
-                    break
-            if not sina_label:
-                for _, row in sina_df.iterrows():
-                    lbl = str(row.get("label") or "").strip()
-                    name = str(row.get("板块") or "").strip()
-                    if ths_name in name or name in raw:
-                        sina_label = lbl
-                        sina_name = name
-                        break
+            labels = {
+                str(row.get("板块") or "").strip(): str(row.get("label") or "").strip()
+                for _, row in sina_df.iterrows()
+            }
+            by_code = next((name for name, label in labels.items() if label and _sector_text(label) == _sector_text(raw)), None)
+            match, _ = match_sector_name(ths_name, list(labels))
+            if by_code or (match and (ths_match or not suggestions or _sector_key(match) == _sector_key(raw))):
+                sina_name = by_code or match
+                sina_label = labels[sina_name]
+                if not ths_match:
+                    ths_name = sina_name.removesuffix("行业")
     except Exception:
         pass
+
+    if not ths_match and not sina_label and suggestions:
+        raise SectorMatchError(suggestions)
 
     return {
         "ths_name": ths_name,
         "sina_name": sina_name,
         "sina_label": sina_label,
     }
+
+
+def lookup_cn_stock_name(symbol: str) -> str | None:
+    """Resolve the short name from the listing exchange's cached stock list."""
+    code, _, exchange_symbol = normalize_cn_symbol(symbol)
+    code_col, name_col = "证券代码", "证券简称"
+    if exchange_symbol.endswith(".SZ"):
+        frame = ak.stock_info_sz_name_code()
+        code_col, name_col = "A股代码", "A股简称"
+    elif exchange_symbol.endswith(".BJ"):
+        frame = ak.stock_info_bj_name_code()
+    else:
+        frame = ak.stock_info_sh_name_code(symbol="科创板" if code.startswith("68") else "主板A股")
+    names = frame.loc[frame[code_col].astype(str).str.strip().str.zfill(6) == code, name_col].dropna()
+    return (str(names.iloc[0]).strip() or None) if not names.empty else None
 
 
 def _fetch_a_share_bars(
@@ -690,11 +754,9 @@ def _fetch_sw_sector_constituents(ths_name: str) -> list[dict[str, Any]]:
         if df is None or df.empty or "行业名称" not in df.columns:
             continue
         names = df["行业名称"].astype(str).str.strip()
-        exact = df[names == target]
-        if exact.empty:
-            exact = df[names.str.contains(target, regex=False, na=False)]
-        if not exact.empty:
-            sw_code = str(exact.iloc[0].get("行业代码") or "").split(".")[0].strip()
+        match, _ = match_sector_name(target, names.tolist())
+        if match:
+            sw_code = str(df[names == match].iloc[0].get("行业代码") or "").split(".")[0].strip()
             if sw_code:
                 break
     if not sw_code:
@@ -729,6 +791,35 @@ def _fetch_sw_sector_constituents(ths_name: str) -> list[dict[str, Any]]:
             }
         )
     return records
+
+
+def _fetch_tx_constituent_quotes(
+    symbols: list[str], errors: list[str],
+) -> dict[str, tuple[float, float | None, float | None]]:
+    """Fetch latest price, daily change (%) and trailing PE for requested A-share symbols."""
+    requested = {prefixed: code for code, prefixed, _ in map(normalize_cn_symbol, symbols)}
+    tickers = list(requested)
+    quotes: dict[str, tuple[float, float | None, float | None]] = {}
+    for offset in range(0, len(tickers), 50):
+        batch = tickers[offset : offset + 50]
+        try:
+            response = httpx.get("https://qt.gtimg.cn/q=" + ",".join(batch), timeout=httpx.Timeout(8, connect=3))
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            errors.append(f"tx_constituent_quotes failed ({exc})")
+            continue
+        payload = response.content.decode("gbk", errors="replace")
+        for ticker, record in re.findall(r'v_([a-z]{2}\d{6})="([^"\r\n]*)";', payload):
+            fields = record.split("~")
+            if ticker not in requested or len(fields) <= 32 or fields[2] != requested[ticker]:
+                continue
+            price = _to_float(fields[3])
+            if price is None or price <= 0:
+                continue
+            change_pct = _to_float(fields[32])
+            pe_ttm = _to_float(fields[39]) if len(fields) > 39 else None
+            quotes[requested[ticker]] = (price, change_pct, pe_ttm if pe_ttm != 0 else None)
+    return quotes
 
 
 def ingest_a_share_sector(
@@ -984,6 +1075,22 @@ def ingest_a_share_sector(
         except Exception as exc:
             errors.append(f"sw_constituents failed ({exc})")
 
+    # List-only and partial providers can still supply membership. Fill only missing quote fields.
+    missing_symbols = [row[1] for row in constituent_rows if None in row[3:6]]
+    if missing_symbols:
+        quotes = _fetch_tx_constituent_quotes(missing_symbols, errors)
+        filled_rows = []
+        for row in constituent_rows:
+            fallback = quotes.get(row[1])
+            if fallback is not None:
+                fields = tuple(
+                    value if value is not None else backup for value, backup in zip(row[3:6], fallback)
+                )
+                row = (*row[:3], *fields, *row[6:])
+            filled_rows.append(row)
+        constituent_rows = filled_rows
+    missing_constituent_quotes = sum(None in row[3:6] for row in constituent_rows)
+
     # 3. Fetch daily bars & stock news for top N constituents by market cap
     ranked_symbols.sort(key=lambda item: item[2], reverse=True)
     top_stocks = ranked_symbols[: max(0, top_constituents)]
@@ -1123,9 +1230,9 @@ def ingest_a_share_sector(
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (sector_name, symbol, source) DO UPDATE SET
                     name = excluded.name,
-                    price = excluded.price,
-                    change_pct = excluded.change_pct,
-                    pe = excluded.pe,
+                    price = COALESCE(excluded.price, sector_constituents.price),
+                    change_pct = COALESCE(excluded.change_pct, sector_constituents.change_pct),
+                    pe = COALESCE(excluded.pe, sector_constituents.pe),
                     pb = excluded.pb,
                     market_cap = excluded.market_cap,
                     updated_at = excluded.updated_at
@@ -1184,10 +1291,12 @@ def ingest_a_share_sector(
     return {
         "run_id": run_id,
         "sector": ths_name,
+        "match_status": "matched" if snap_rows or constituent_rows else "unmatched",
         "sina_label": sina_label,
         "status": status,
         "snapshots": len(snap_rows),
         "constituents": len(constituent_rows),
+        "missing_constituent_quotes": missing_constituent_quotes,
         "bars": len(bar_rows),
         "news": len(dedup_news),
         "rows_written": rows_written,

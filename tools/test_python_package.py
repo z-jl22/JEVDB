@@ -46,7 +46,7 @@ class PythonPackageTest(unittest.TestCase):
             (str(i), f"good movie {i}" if i < 5 else f"bad movie {i}", "POSITIVE")
             for i in range(201)
         ], columns=["reviewId", "reviewText", "scoreSentiment"]).to_csv(self.csv, index=False)
-        notebook = Path(__file__).resolve().parents[1] / "examples/jevdb_colab.ipynb"
+        notebook = Path(__file__).resolve().parent / "fixtures" / "jevdb_colab.ipynb"
         nb = nbformat.read(notebook, as_version=4)
         nbformat.validate(nb)
         self.cells = {c.id: c for c in nb.cells if c.cell_type == "code"}

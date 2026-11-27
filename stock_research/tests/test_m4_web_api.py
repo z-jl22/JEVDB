@@ -16,6 +16,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
@@ -138,9 +139,22 @@ def test_market_bars_unknown_sector_dedup_fundamentals_news(
                 ('000858', 'CN', DATE '2025-03-31', 16.5, 3.8, 0.23, 320e8, 120e8, 0.25, '{}', 'akshare_em', TIMESTAMP '2025-05-15 10:00:00')
                 """
             )
+            con.executemany(
+                """
+                INSERT INTO news_events (event_id, symbol, market, title, summary, sentiment_label)
+                VALUES (?, '000858', 'CN', ?, ?, ?)
+                """,
+                [
+                    ("positive", "公司公告", "公司宣布回购", None),
+                    ("negative", "公司违约", "", None),
+                    ("neutral", "有回购也有减持", "", None),
+                    ("prelabeled", "公司宣布回购", "", "bearish"),
+                ],
+            )
 
         r_bars = client.get("/api/market/bars", params={"symbol": "000858", "market": "CN", "days": 30})
         assert r_bars.status_code == 200
+        assert r_bars.json()["name"] == "五粮液"
         bars = r_bars.json()["bars"]
         assert len(bars) >= 5
         dates = [b["date"] for b in bars]
@@ -157,6 +171,9 @@ def test_market_bars_unknown_sector_dedup_fundamentals_news(
         sec_data = r_sec.json()
         assert len(sec_data["snapshots"]) == 1
         assert sec_data["snapshots"][0]["source"] == "akshare_ths"
+        for alias in ("电力行业", "Ａ股 电力板块", "new_dlhy"):
+            result = client.get("/api/market/sector", params={"name": alias}).json()
+            assert result["sector"] == "电力" and result["constituents"] == sec_data["constituents"]
         assert sec_data["snapshots"][0]["change_pct"] == pytest.approx(2.35)
         assert len(sec_data["constituents"]) == 2
         cj = [c for c in sec_data["constituents"] if c["symbol"] == "600900"][0]
@@ -171,6 +188,155 @@ def test_market_bars_unknown_sector_dedup_fundamentals_news(
         assert r_news.status_code == 200
         news_items = r_news.json()["news"]
         assert isinstance(news_items, list) and len(news_items) >= 1
+        sentiment_by_id = {item["event_id"]: item["sentiment"] for item in news_items}
+        assert {event: sentiment_by_id[event] for event in ("positive", "negative", "neutral", "prelabeled")} == {
+            "positive": "positive", "negative": "negative", "neutral": "neutral", "prelabeled": "negative",
+        }
+        with db_session(isolated_api_env["db_path"]) as con:
+            assert con.execute("SELECT sentiment_label FROM news_events WHERE event_id = 'positive'").fetchone() == (None,)
+
+
+@pytest.mark.parametrize(("market", "symbol", "collector"), [
+    ("CN", "600519", "ingest_a_share_stock"),
+    ("US", "AAPL", "ingest_us_stock"),
+])
+def test_market_bars_fills_requested_count_when_enabled(
+    isolated_api_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+    market: str, symbol: str, collector: str,
+) -> None:
+    calls = []
+    name_calls = []
+
+    def lookup_name(ticker: str) -> str:
+        name_calls.append(ticker)
+        return "示例股票"
+
+    def ingest(**kwargs: Any) -> dict[str, int]:
+        calls.append(kwargs)
+        assert kwargs["symbol"] == symbol
+        assert not kwargs["include_fundamentals"] and not kwargs["include_news"]
+        with db_session(kwargs["db_path"]) as con:
+            con.execute(
+                "INSERT INTO market_bars VALUES (?, ?, ?, 10, 12, 9, 11, 100, 1100, 'test')",
+                [symbol, market, date(2025, 5, 14) + timedelta(days=len(calls))],
+            )
+        return {"bars": 1}
+
+    monkeypatch.setattr(api_module, collector, ingest)
+    monkeypatch.setattr(api_module, f"lookup_{market.lower()}_stock_name", lookup_name)
+    params = {"symbol": symbol, "market": market}
+    with TestClient(create_app()) as client:
+        assert client.get("/api/market/bars", params=params).json()["bars"] == []
+        assert not calls
+
+        for days, call_count in [(1, 1), (2, 2), (2, 2), (1, 2)]:
+            result = client.get("/api/market/bars", params={**params, "days": days, "fetch_missing": "true"})
+            assert result.status_code == 200
+            assert result.json()["name"] == "示例股票"
+            bars = result.json()["bars"]
+            assert len(bars) == days
+            assert bars[-1]["date"] == (date(2025, 5, 14) + timedelta(days=call_count)).isoformat()
+            assert len(calls) == call_count
+        assert name_calls == [symbol]
+
+
+def test_sector_query_suggests_candidates_without_combining_boards(isolated_api_env: dict[str, Path]) -> None:
+    with TestClient(create_app()) as client:
+        with db_session(isolated_api_env["db_path"]) as con:
+            con.executemany(
+                "INSERT INTO sector_constituents (sector_name, symbol, name, source) VALUES (?, ?, ?, 'test')",
+                [("光伏设备", "600101", "设备股"), ("光伏发电", "600102", "发电股")],
+            )
+        ambiguous = client.get("/api/market/sector", params={"name": "光伏"}).json()
+        assert ambiguous["match_status"] == "suggestions"
+        assert set(ambiguous["suggestions"]) == {"光伏设备", "光伏发电"}
+        assert ambiguous["constituents"] == []
+        typo = client.get("/api/market/sector", params={"name": "光伏设背"}).json()
+        assert "光伏设备" in typo["suggestions"] and not typo["constituents"]
+        selected = client.get("/api/market/sector", params={"name": "光伏设备板块"}).json()
+        assert selected["sector"] == "光伏设备"
+        assert [stock["symbol"] for stock in selected["constituents"]] == ["600101"]
+
+
+def test_sector_sync_returns_online_candidates(monkeypatch: pytest.MonkeyPatch, isolated_api_env: dict[str, Path]) -> None:
+    import pandas as pd
+
+    from stock_research.storage.ingest import akshare_cn
+
+    monkeypatch.setattr(akshare_cn.ak, "stock_board_industry_summary_ths", lambda: pd.DataFrame({"板块": ["光伏设备", "光伏发电"]}))
+    monkeypatch.setattr(akshare_cn.ak, "stock_sector_spot", lambda **_: pd.DataFrame())
+    with TestClient(create_app()) as client:
+        response = client.post("/api/market/ingest", json={"kind": "a_share_sector", "sector": "光伏板块"})
+        assert response.status_code == 200
+        result = response.json()
+        assert result["match_status"] == "suggestions"
+        assert set(result["suggestions"]) == {"光伏设备", "光伏发电"}
+
+
+def test_existing_market_database_adds_news_analysis_table(isolated_api_env: dict[str, Path]) -> None:
+    with db_session(isolated_api_env["db_path"], init=True) as con:
+        con.execute("DROP TABLE news_sentiment_analysis")
+        con.execute(
+            "INSERT INTO news_events (event_id, market, symbol, title) VALUES ('old-news', 'CN', '601318', '公司宣布回购')"
+        )
+
+    with TestClient(create_app()) as client:
+        response = client.get("/api/market/news", params={"symbol": "601318", "market": "CN"})
+        assert response.status_code == 200
+        existing = next(item for item in response.json()["news"] if item["event_id"] == "old-news")
+        assert existing["sentiment"] == "positive"
+
+
+@pytest.mark.parametrize(("kind", "market", "symbol", "collector"), [
+    ("a_share_stock", "CN", "600519", "ingest_a_share_stock"),
+    ("us_stock", "US", "AAPL", "ingest_us_stock"),
+])
+def test_stock_ingest_analyzes_news_and_reuses_results(
+    isolated_api_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+    kind: str, market: str, symbol: str, collector: str,
+) -> None:
+    labels = {"a": "positive", "b": "negative", "c": "neutral", "d": "insufficient"}
+    requests = []
+
+    def ingest(**kwargs: Any) -> dict[str, Any]:
+        with db_session(kwargs["db_path"]) as con:
+            con.executemany(
+                "INSERT OR IGNORE INTO news_events (event_id, market, symbol, title) VALUES (?, ?, ?, ?)",
+                [(event, market, symbol, f"无关键词的消息 {event}") for event in labels],
+            )
+        return {"status": "success", "rows_written": len(labels)}
+
+    def post(url: str, **kwargs: Any) -> httpx.Response:
+        requests.append(url)
+        assert kwargs["headers"]["Authorization"] == "Bearer test-news-key"
+        payload = kwargs["json"]
+        assert payload["model"] == "vendor/news-model"
+        context = json.loads(payload["messages"][1]["content"])
+        assert context["symbol"] == symbol and context["market"] == market
+        assert len(context["items"]) == len(labels)
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
+            "choices": [{"message": {"content": json.dumps({"answers": list(labels.values())})}}],
+        })
+
+    monkeypatch.setattr(api_module, collector, ingest)
+    monkeypatch.setattr("stock_research.storage.news_sentiment.httpx.post", post)
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://server.example/v1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-server-key")
+    body = {"kind": kind, "symbol": symbol, "analyze_news": True}
+    connection = {"base_url": "https://custom.example/v1/", "model": "vendor/news-model"}
+    with TestClient(create_app()) as client:
+        missing_key = client.post("/api/market/ingest", json={**body, "news_connection": connection})
+        assert missing_key.json()["news_analysis"]["status"] == "unconfigured"
+        assert not requests
+        connection["api_key"] = "test-news-key"
+        for count in (4, 0):
+            result = client.post("/api/market/ingest", json={**body, "news_connection": connection})
+            assert result.status_code == 200, result.text
+            assert result.json()["news_analysis"]["analyzed"] == count
+        assert requests == ["https://custom.example/v1/chat/completions"]
+        news = client.get("/api/market/news", params={"symbol": symbol, "market": market}).json()["news"]
+        assert {item["event_id"]: item["sentiment"] for item in news} == labels
+        assert all(item["sentiment_source"] == "model" and item["sentiment_label"] is None for item in news)
 
 
 def test_market_ingest_dispatch_and_validation(
@@ -216,6 +382,7 @@ def test_market_ingest_dispatch_and_validation(
             {"kind": "a_share_sector", "sector": "电力", "days": 5},
             {"kind": "a_share_stock", "symbol": "000858", "days": 10},
             {"kind": "us_stock", "symbol": "AAPL", "period": "1mo"},
+            {"kind": "us_stock", "symbol": "AAPL", "days": 250},
             {"kind": "sec_edgar", "symbol": "AAPL"},
             {"kind": "finnhub_news", "symbol": "AAPL", "days": 7},
             {"kind": "finnhub_earnings", "from_date": "2025-05-01", "to_date": "2025-05-15"},
@@ -228,10 +395,13 @@ def test_market_ingest_dispatch_and_validation(
             "a_share_sector",
             "a_share_stock",
             "us_stock",
+            "us_stock",
             "sec_edgar",
             "finnhub_news",
             "finnhub_earnings",
         ]
+        assert calls[2][1]["period"] == "1mo" and "start_date" not in calls[2][1]
+        assert calls[3][1]["start_date"] == date.today() - timedelta(days=500)
 
         # Missing symbol or unknown kind -> 422
         assert client.post("/api/market/ingest", json={"kind": "a_share_stock"}).status_code == 422
@@ -540,13 +710,17 @@ def test_agent_query_and_sse_stream_events_and_errors(
     isolated_api_env: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    received_options = []
+
     def _fake_run(
         prompt: str,
         mode: str = "auto",
         session_id: str | None = None,
         on_event: Any = None,
         timeout_seconds: float = 300.0,
+        **overrides: str,
     ) -> dict[str, Any]:
+        received_options.append(overrides)
         if on_event is not None:
             on_event({"type": "status", "stage": "started", "prompt": prompt, "mode": mode})
             on_event({"type": "tool_start", "tool_call_id": "tc1", "name": "query_stored_market_data", "args": {"symbol": "000858"}})
@@ -571,16 +745,22 @@ def test_agent_query_and_sse_stream_events_and_errors(
         }
 
     monkeypatch.setattr(api_module, "run_research_query", _fake_run)
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://default.example/v1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-server-secret")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "default-model")
 
     app = create_app()
     with TestClient(app) as client:
+        assert client.get("/api/agent/settings").json() == {
+            "base_url": "https://default.example/v1", "has_api_key": True, "model": "default-model",
+        }
         # Empty prompts -> 422
         assert client.post("/api/agent/query", json={"prompt": "   "}).status_code == 422
         assert client.post("/api/agent/query", json={}).status_code == 422
         assert client.get("/api/agent/stream", params={"prompt": "   "}).status_code == 422
 
         # Valid POST query
-        r_q = client.post("/api/agent/query", json={"prompt": "分析000858"})
+        r_q = client.post("/api/agent/query", json={"prompt": "分析000858", "model": "   "})
         assert r_q.status_code == 200
         q_json = r_q.json()
         assert len(q_json["tool_calls"]) == 1
@@ -594,6 +774,19 @@ def test_agent_query_and_sse_stream_events_and_errors(
         ev_names = [name for name, _ in parsed]
         assert ev_names == ["status", "tool_start", "tool_end", "verification", "final_answer"]
         assert parsed[-1][1]["sources"] == ["duckdb:market_bars"]
+        assert received_options == [{}, {}]
+
+        overrides = {"base_url": "https://custom.example/v1", "api_key": "test-request-secret", "model": "vendor/custom-model"}
+        for path in ("/api/agent/stream", "/api/agent/query"):
+            response = client.post(path, json={"prompt": "分析000858", **overrides})
+            assert response.status_code == 200
+            assert "test-request-secret" not in response.text
+            assert received_options[-1] == overrides
+            if path.endswith("stream"):
+                assert _parse_sse_events(response.text)[-1][0] == "final_answer"
+        invalid = client.post("/api/agent/stream", json={"prompt": "test", "api_key": ["test-request-secret"]})
+        assert invalid.status_code == 422
+        assert "test-request-secret" not in invalid.text
 
         # Error mappings: RuntimeError -> 503, TimeoutError -> 504
         def _raise_runtime(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -669,7 +862,9 @@ def test_playwright_ui_all_views_validation_sse_and_reload_persistence(
         session_id: str | None = None,
         on_event: Any = None,
         timeout_seconds: float = 300.0,
+        **overrides: str,
     ) -> dict[str, Any]:
+        assert overrides == {"base_url": "https://custom.example/v1", "api_key": "test-browser-key", "model": "vendor/custom-model"}
         if on_event is not None:
             on_event({"type": "status", "stage": "started", "prompt": prompt})
             on_event({"type": "tool_start", "tool_call_id": "pw1", "name": "query_stored_market_data", "args": {"sector": "电力"}})
@@ -695,6 +890,9 @@ def test_playwright_ui_all_views_validation_sse_and_reload_persistence(
         }
 
     monkeypatch.setattr(api_module, "run_research_query", _fake_agent)
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://default.example/v1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-server-secret")
+    monkeypatch.setenv("DEEPSEEK_MODEL", "default-model")
 
     port = _free_port()
     app = create_app()
@@ -736,10 +934,18 @@ with sync_playwright() as p:
     page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
     page.on("pageerror", lambda e: page_errors.append(str(e)))
     page.on("response", lambda r: server_errors.append({"url": r.url, "status": r.status}) if r.status >= 500 else None)
-    page.on("request", lambda r: agent_reqs.append(r.url) if "/api/agent/" in r.url else None)
+    page.on("request", lambda r: agent_reqs.append(r.url) if r.method == "POST" and "/api/agent/" in r.url else None)
 
     page.goto(base_url + "/", wait_until="networkidle", timeout=20000)
     page.locator("[data-testid='agent-input']").wait_for(state="visible", timeout=15000)
+    backend = page.get_by_role("textbox", name="Base URL", exact=True)
+    api_key = page.get_by_test_id("agent-api-key")
+    model = page.get_by_test_id("agent-model")
+    assert backend.get_attribute("placeholder") == "https://default.example/v1"
+    assert model.get_attribute("placeholder") == "default-model"
+    assert api_key.get_attribute("placeholder") == "使用服务端已配置的 API Key"
+    assert api_key.get_attribute("type") == "password"
+    assert backend.input_value() == api_key.input_value() == model.input_value() == ""
 
     # 1. Inspect all 8 testids and chart canvas dimensions on initial load
     selectors = [
@@ -769,6 +975,9 @@ with sync_playwright() as p:
     reqs_after_empty = list(agent_reqs)
 
     # 3. Real SSE research query flow in UI
+    backend.fill("https://custom.example/v1")
+    api_key.fill("test-browser-key")
+    model.fill("vendor/custom-model")
     page.locator("[data-testid='agent-input']").fill("最近3天电力行业")
     page.locator("[data-testid='agent-submit']").click()
     page.wait_for_function(
@@ -785,8 +994,24 @@ with sync_playwright() as p:
         "() => ({ h2: document.querySelectorAll('[data-testid=\"agent-answer\"] h2').length, strong: document.querySelectorAll('[data-testid=\"agent-answer\"] strong').length, table: document.querySelectorAll('[data-testid=\"agent-answer\"] table').length })"
     )
 
-    # 4. Reload and confirm paper holdings persistence
+    # 4. Reload and confirm the last submitted connection and paper holdings persist.
+    saved = page.evaluate("JSON.parse(localStorage.getItem('jevdb.agent.lastConnection'))")
+    assert saved == {"base_url": "https://custom.example/v1", "model": "vendor/custom-model"}
+    backend.fill("https://unsent.example/v1")
+    model.fill("unsent-model")
     page.reload(wait_until="networkidle", timeout=20000)
+    assert api_key.input_value() == ""
+    assert api_key.get_attribute("placeholder") == "请输入此 Base URL 对应的 API Key"
+    assert backend.input_value() == model.input_value() == ""
+    assert backend.get_attribute("placeholder") == saved["base_url"]
+    assert model.get_attribute("placeholder") == saved["model"]
+    api_key.fill("test-browser-key")
+    page.get_by_test_id("agent-input").fill("复用上次连接")
+    with page.expect_request(lambda r: r.method == "POST" and "/api/agent/stream" in r.url) as pending:
+        page.get_by_test_id("agent-submit").click()
+    request_body = pending.value.post_data_json
+    assert {key: request_body[key] for key in saved} == saved
+    page.get_by_test_id("agent-answer").get_by_text("复用上次连接", exact=False).wait_for()
     page.wait_for_function(
         "() => { const el = document.querySelector('[data-testid=\"paper-holdings\"]'); return el && el.innerText.trim().includes('000858'); }",
         timeout=15000,

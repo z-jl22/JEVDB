@@ -12,13 +12,18 @@ import signal
 import subprocess
 import threading
 import time
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Callable
 
 import httpx
 
 from stock_research.agent.verifier import verify_answer_grounding
-from stock_research.config import Settings, get_settings
+from stock_research.config import DEFAULT_DEEPSEEK_BASE_URL, DEFAULT_DEEPSEEK_MODEL, Settings, get_settings
+
+_PI_DEEPSEEK_MODELS = frozenset({DEFAULT_DEEPSEEK_MODEL, "deepseek-v4-pro"})
 
 _URL_RE = re.compile(r"https?://[^\s\)\]>\"'`*\\（），。；、]+")
 _SOURCE_KEY_RE = re.compile(
@@ -214,7 +219,7 @@ def _repair_ungrounded_answer(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": settings.deepseek_model or "deepseek-flash",
+                    "model": settings.deepseek_model,
                     "messages": [
                         {
                             "role": "system",
@@ -272,7 +277,7 @@ def _synthesize_answer_from_tools(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": settings.deepseek_model or "deepseek-flash",
+                    "model": settings.deepseek_model,
                     "messages": [
                         {"role": "system", "content": _RESEARCH_SYSTEM_PROMPT},
                         {"role": "user", "content": synth_prompt},
@@ -311,8 +316,44 @@ def run_research_query(
     session_id: str | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     timeout_seconds: float = 300.0,
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Execute a multi-turn research query through pi-coding-agent + DeepSeek + JEVDB MCP."""
+    settings = get_settings(ensure_dirs=False)
+    if base_url and base_url != settings.deepseek_base_url and not api_key:
+        raise ValueError("请为自定义 Base URL 输入对应的 API Key。")
+    settings = replace(
+        settings,
+        deepseek_base_url=base_url or settings.deepseek_base_url,
+        deepseek_api_key=api_key or settings.deepseek_api_key,
+        deepseek_model=(model or "").strip() or settings.deepseek_model,
+    )
+    # Keep Pi's original capabilities for its built-in models. Register other IDs explicitly.
+    custom_model = settings.deepseek_model not in _PI_DEEPSEEK_MODELS
+    custom_config = custom_model or api_key or settings.deepseek_base_url != DEFAULT_DEEPSEEK_BASE_URL
+    with (TemporaryDirectory(prefix="jevdb-pi-") if custom_config else nullcontext()) as agent_dir:
+        if agent_dir is not None:
+            provider: dict[str, Any] = {"baseUrl": settings.deepseek_base_url, "apiKey": "${DEEPSEEK_API_KEY}"}
+            if custom_model:
+                provider["models"] = [{"id": settings.deepseek_model, "api": "openai-completions"}]
+            (Path(agent_dir) / "models.json").write_text(
+                json.dumps({"providers": {"deepseek": provider}}), encoding="utf-8"
+            )
+        return _run_research_query(prompt, mode, session_id, on_event, timeout_seconds, settings, agent_dir)
+
+
+def _run_research_query(
+    prompt: str,
+    mode: str,
+    session_id: str | None,
+    on_event: Callable[[dict[str, Any]], None] | None,
+    timeout_seconds: float,
+    settings: Settings,
+    agent_dir: str | None,
+) -> dict[str, Any]:
     clean_prompt = str(prompt or "").strip()
     if not clean_prompt:
         raise ValueError("Research prompt must be non-empty")
@@ -326,14 +367,12 @@ def run_research_query(
     if not math.isfinite(timeout_val) or timeout_val <= 0:
         raise ValueError(f"timeout_seconds must be finite and > 0, got {timeout_seconds!r}")
 
-    settings = get_settings(ensure_dirs=False)
     if not settings.deepseek_api_key:
         raise RuntimeError(
-            "DEEPSEEK_API_KEY is missing; set DEEPSEEK_API_KEY in the environment before running Pi agent."
+            "DEEPSEEK_API_KEY is missing. Enter an API Key in the Agent workspace or set DEEPSEEK_API_KEY."
         )
 
     pi_bin = _resolve_pi_binary(settings)
-    model_id = settings.deepseek_model or "deepseek-flash"
 
     cmd = [
         pi_bin,
@@ -344,7 +383,7 @@ def run_research_query(
         "--provider",
         "deepseek",
         "--model",
-        model_id,
+        settings.deepseek_model,
         "--thinking",
         "low",
         "--tools",
@@ -358,11 +397,19 @@ def run_research_query(
 
     env = os.environ.copy()
     env["DEEPSEEK_API_KEY"] = settings.deepseek_api_key
+    env["DEEPSEEK_BASE_URL"] = settings.deepseek_base_url
+    env["DEEPSEEK_MODEL"] = settings.deepseek_model
+    if agent_dir is not None:
+        env["PI_CODING_AGENT_DIR"] = agent_dir
     if settings.finnhub_api_key:
         env["FINNHUB_API_KEY"] = settings.finnhub_api_key
 
     t_start = time.perf_counter()
-    _emit(on_event, {"type": "status", "stage": "started", "prompt": clean_prompt, "mode": mode, "session_id": session_id})
+    connection = {"base_url": settings.deepseek_base_url, "model": settings.deepseek_model}
+    _emit(on_event, {
+        "type": "status", "stage": "started", "prompt": clean_prompt, "mode": mode,
+        "session_id": session_id, "connection": connection,
+    })
 
     popen_kwargs: dict[str, Any] = {
         "cwd": str(settings.repo_root),
@@ -598,9 +645,11 @@ def run_research_query(
             stderr_thread.join(timeout=1.0)
 
     stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
+    stderr_text = stderr_text.replace(settings.deepseek_api_key, "[redacted]")
 
     if assistant_error and not latest_assistant_text:
-        raise RuntimeError(f"Pi agent error: {assistant_error}")
+        detail = assistant_error.replace(settings.deepseek_api_key, "[redacted]")
+        raise RuntimeError(f"Pi agent error: {detail}")
     if returncode != 0 and not latest_assistant_text:
         raise RuntimeError(f"Pi agent exited with code {returncode}: {stderr_text}")
 
@@ -679,6 +728,7 @@ def run_research_query(
             "answer": answer,
             "sources": sources,
             "duration_ms": duration_ms,
+            "connection": connection,
         },
     )
 
@@ -689,4 +739,5 @@ def run_research_query(
         "answer": answer,
         "sources": sources,
         "duration_ms": duration_ms,
+        "connection": connection,
     }

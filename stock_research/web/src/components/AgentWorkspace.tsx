@@ -2,21 +2,17 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  agentEvents,
   apiJson,
+  isSafeHttpUrl,
+  type AgentConnection,
+  type AgentQueryRequest,
   type AgentQueryResponse,
+  type AgentSettings,
   type AgentVerification,
+  type ModelConnectionOptions,
   type ToolCallItem,
 } from "../api";
-
-function isSafeHttpUrl(raw: string | undefined): boolean {
-  if (!raw) return false;
-  try {
-    const u = new URL(raw.trim());
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 const PRESET_PROMPTS = [
   "我想知道最近3天a股电力行业的情况",
@@ -24,9 +20,30 @@ const PRESET_PROMPTS = [
   "结合行情与财务数据给出 A 股日频量化交易策略建议",
 ];
 
-export default function AgentWorkspace() {
+const LAST_CONNECTION_KEY = "jevdb.agent.lastConnection";
+
+function readLastConnection(): AgentConnection | null {
+  try {
+    const data = JSON.parse(localStorage.getItem(LAST_CONNECTION_KEY) ?? "null") as Partial<AgentConnection> | null;
+    if (typeof data?.base_url === "string" && data.base_url && typeof data.model === "string" && data.model) {
+      return { base_url: data.base_url, model: data.model };
+    }
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+  return null;
+}
+
+export default function AgentWorkspace({ onConnectionChange }: {
+  onConnectionChange: (connection: ModelConnectionOptions) => void;
+}) {
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState("auto");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState("");
+  const [defaults, setDefaults] = useState<AgentSettings | null>(null);
+  const [lastConnection, setLastConnection] = useState(readLastConnection);
   const [validationErr, setValidationErr] = useState("");
   const [running, setRunning] = useState(false);
   const [stage, setStage] = useState<"idle" | "running" | "done" | "error">("idle");
@@ -38,46 +55,68 @@ export default function AgentWorkspace() {
   const [runError, setRunError] = useState("");
   const [showRawMd, setShowRawMd] = useState(false);
   const [copied, setCopied] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
+  const requestRef = useRef<AbortController | null>(null);
+  const effectiveBaseUrl = baseUrl.trim() || lastConnection?.base_url;
+  const effectiveModel = model.trim() || lastConnection?.model;
+  const defaultBaseUrl = defaults?.base_url || "https://api.deepseek.com/v1";
+  const usesCustomBaseUrl = effectiveBaseUrl && effectiveBaseUrl.replace(/\/+$/, "") !== defaultBaseUrl;
 
   useEffect(() => {
+    onConnectionChange({ base_url: effectiveBaseUrl, model: effectiveModel, api_key: apiKey.trim() || undefined });
+  }, [effectiveBaseUrl, effectiveModel, apiKey, onConnectionChange]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void apiJson<AgentSettings>("/api/agent/settings", { signal: controller.signal })
+      .then(setDefaults)
+      .catch(() => undefined);
     return () => {
-      if (esRef.current) {
-        esRef.current.close();
-        esRef.current = null;
-      }
+      controller.abort();
+      requestRef.current?.abort();
     };
   }, []);
 
-  const fallbackQuery = async (cleanPrompt: string) => {
-    try {
-      const res = await apiJson<AgentQueryResponse>("/api/agent/query", {
-        method: "POST",
-        body: JSON.stringify({ prompt: cleanPrompt, mode }),
-      });
-      setToolCalls(res.tool_calls ?? []);
-      setVerification(res.verification ?? null);
-      setAnswer(res.answer || "未返回有效回答。");
-      setSources(res.sources ?? []);
-      setDurationMs(res.duration_ms ?? null);
-      setStage("done");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Agent 查询失败";
-      setRunError(msg);
-      setAnswer(`执行失败：${msg}`);
-      setStage("error");
-    } finally {
-      setRunning(false);
-    }
+  const showRunError = (message: string) => {
+    setRunError(message);
+    setAnswer(`执行失败：${message}`);
+    setStage("error");
   };
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (requestRef.current) return;
     const cleanPrompt = prompt.trim();
     if (!cleanPrompt) {
       setValidationErr("请输入研究问题或投资需求后再提交（不能为空）。");
       return;
     }
+
+    const request: AgentQueryRequest = {
+      prompt: cleanPrompt,
+      mode,
+      base_url: effectiveBaseUrl || undefined,
+      api_key: apiKey.trim() || undefined,
+      model: effectiveModel,
+    };
+    let remembered = false;
+    const rememberConnection = (connection?: AgentConnection) => {
+      if (remembered) return;
+      const next = {
+        base_url: connection?.base_url ?? request.base_url ?? defaults?.base_url,
+        model: connection?.model ?? request.model ?? defaults?.model,
+      };
+      if (!next.base_url || !next.model) return;
+      const record = { base_url: next.base_url, model: next.model };
+      remembered = true;
+      setLastConnection(record);
+      try {
+        localStorage.setItem(LAST_CONNECTION_KEY, JSON.stringify(record));
+      } catch {
+        // The current page can still reuse the settings.
+      }
+    };
+    const controller = new AbortController();
+    requestRef.current = controller;
     setValidationErr("");
     setRunError("");
     setRunning(true);
@@ -88,148 +127,78 @@ export default function AgentWorkspace() {
     setSources([]);
     setDurationMs(null);
 
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
-
-    let finished = false;
-    let receivedAnyEvent = false;
-    const streamUrl = `/api/agent/stream?prompt=${encodeURIComponent(cleanPrompt)}&mode=${encodeURIComponent(mode)}`;
-    const es = new EventSource(streamUrl);
-    esRef.current = es;
-
-    es.addEventListener("status", () => {
-      receivedAnyEvent = true;
-    });
-
-    es.addEventListener("tool_start", (ev) => {
-      receivedAnyEvent = true;
-      try {
-        const data = JSON.parse((ev as MessageEvent).data) as {
-          tool_call_id?: string;
-          name?: string;
-          args?: Record<string, unknown>;
-        };
-        setToolCalls((prev) => [
-          ...prev,
-          {
-            tool_call_id: data.tool_call_id,
-            name: data.name || "mcp_tool",
-            args: data.args || {},
-            status: "running",
-          },
-        ]);
-      } catch {
-        // ignore malformed chunk
-      }
-    });
-
-    es.addEventListener("tool_end", (ev) => {
-      receivedAnyEvent = true;
-      try {
-        const data = JSON.parse((ev as MessageEvent).data) as {
-          tool_call_id?: string;
-          name?: string;
-          args?: Record<string, unknown>;
-          result_summary?: string;
-          duration_ms?: number;
-          is_error?: boolean;
-        };
-        setToolCalls((prev) => {
-          const idx = prev.findIndex(
-            (item) =>
-              (data.tool_call_id && item.tool_call_id === data.tool_call_id) ||
-              (item.name === data.name && item.status === "running")
-          );
-          const updated: ToolCallItem = {
-            tool_call_id: data.tool_call_id,
-            name: data.name || "mcp_tool",
-            args: data.args || {},
-            result_summary: data.result_summary || "",
-            duration_ms: data.duration_ms,
-            is_error: Boolean(data.is_error),
-            status: data.is_error ? "error" : "done",
-          };
-          if (idx >= 0) {
-            const copy = [...prev];
-            copy[idx] = updated;
-            return copy;
+    try {
+      for await (const { name, data } of agentEvents(request, controller.signal)) {
+        switch (name) {
+          case "status": {
+            const status = data as { stage?: string; connection?: AgentConnection };
+            if (status.stage === "started") rememberConnection(status.connection);
+            break;
           }
-          return [...prev, updated];
-        });
-      } catch {
-        // ignore malformed chunk
-      }
-    });
-
-    es.addEventListener("verification", (ev) => {
-      receivedAnyEvent = true;
-      try {
-        const data = JSON.parse((ev as MessageEvent).data) as AgentVerification;
-        setVerification(data);
-      } catch {
-        // ignore malformed chunk
-      }
-    });
-
-    es.addEventListener("final_answer", (ev) => {
-      receivedAnyEvent = true;
-      finished = true;
-      try {
-        const data = JSON.parse((ev as MessageEvent).data) as {
-          answer?: string;
-          sources?: string[];
-          duration_ms?: number;
-        };
-        setAnswer(data.answer || "已完成分析，但未生成正文。");
-        setSources(data.sources || []);
-        setDurationMs(data.duration_ms ?? null);
-        setStage("done");
-      } catch {
-        setStage("done");
-      } finally {
-        setRunning(false);
-        es.close();
-        if (esRef.current === es) esRef.current = null;
-      }
-    });
-
-    es.addEventListener("error", (ev) => {
-      const msgEv = ev as MessageEvent;
-      if (msgEv && typeof msgEv.data === "string" && msgEv.data.trim()) {
-        finished = true;
-        try {
-          const data = JSON.parse(msgEv.data) as { detail?: string };
-          const msg = data.detail || "SSE 流执行出错";
-          setRunError(msg);
-          setAnswer(`执行失败：${msg}`);
-        } catch {
-          setRunError("SSE 流执行出错");
-          setAnswer("执行失败：SSE 流执行出错");
+          case "tool_start": {
+            const tool = data as ToolCallItem;
+            setToolCalls((prev) => [...prev, { ...tool, status: "running" }]);
+            break;
+          }
+          case "tool_end": {
+            const tool = data as ToolCallItem;
+            const updated: ToolCallItem = { ...tool, status: tool.is_error ? "error" : "done" };
+            setToolCalls((prev) => {
+              const idx = prev.findIndex((item) =>
+                tool.tool_call_id
+                  ? item.tool_call_id === tool.tool_call_id
+                  : item.name === tool.name && item.status === "running",
+              );
+              return idx < 0
+                ? [...prev, updated]
+                : prev.map((item, index) => (index === idx ? updated : item));
+            });
+            break;
+          }
+          case "verification":
+            setVerification(data as AgentVerification);
+            break;
+          case "final_answer": {
+            const result = data as AgentQueryResponse;
+            rememberConnection(result.connection);
+            setAnswer(result.answer || "已完成分析，但未生成正文。");
+            setSources(result.sources || []);
+            setDurationMs(result.duration_ms ?? null);
+            setStage("done");
+            return;
+          }
+          case "error": {
+            const error = data as { detail?: string };
+            showRunError(error.detail || "SSE 流执行出错");
+            return;
+          }
         }
-        setStage("error");
-        setRunning(false);
-        es.close();
-        if (esRef.current === es) esRef.current = null;
       }
-    });
-
-    es.onerror = () => {
-      if (finished) {
-        es.close();
-        if (esRef.current === es) esRef.current = null;
-        return;
+      throw new Error("Agent 实时连接中断");
+    } catch {
+      if (controller.signal.aborted) return;
+      try {
+        const result = await apiJson<AgentQueryResponse>("/api/agent/query", {
+          method: "POST",
+          body: JSON.stringify(request),
+          signal: controller.signal,
+        });
+        rememberConnection(result.connection);
+        setToolCalls(result.tool_calls ?? []);
+        setVerification(result.verification ?? null);
+        setAnswer(result.answer || "未返回有效回答。");
+        setSources(result.sources ?? []);
+        setDurationMs(result.duration_ms ?? null);
+        setStage("done");
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          showRunError(err instanceof Error ? err.message : "Agent 查询失败");
+        }
       }
-      es.close();
-      if (esRef.current === es) esRef.current = null;
-      if (!receivedAnyEvent) {
-        void fallbackQuery(cleanPrompt);
-      } else {
-        setRunError("实时流连接中断，正在尝试回退请求...");
-        void fallbackQuery(cleanPrompt);
-      }
-    };
+    } finally {
+      requestRef.current = null;
+      if (!controller.signal.aborted) setRunning(false);
+    }
   };
 
   const renderToolCallsContent = () => {
@@ -330,39 +299,84 @@ export default function AgentWorkspace() {
         <span className={`flow-pill ${stage === "done" ? "active" : ""}`}>4. 结果展示</span>
       </div>
 
-      <form onSubmit={handleSubmit} className="controls-row">
-        <input
-          data-testid="agent-input"
-          className="input input-grow"
-          type="text"
-          value={prompt}
-          onChange={(e) => {
-            setPrompt(e.target.value);
-            if (validationErr && e.target.value.trim()) {
-              setValidationErr("");
-            }
-          }}
-          placeholder="输入投研问题，例如：我想知道最近3天a股电力行业的情况"
-          aria-label="研究问题输入框"
-        />
-        <select
-          className="select"
-          value={mode}
-          onChange={(e) => setMode(e.target.value)}
-          aria-label="研究模式"
-        >
-          <option value="auto">智能模式 (Auto)</option>
-          <option value="value">价值投资 (Value)</option>
-          <option value="quant">量化策略 (Quant)</option>
-        </select>
-        <button
-          data-testid="agent-submit"
-          className="btn"
-          type="submit"
-          disabled={running}
-        >
-          {running ? "研判执行中..." : "发起投研分析"}
-        </button>
+      <form onSubmit={handleSubmit}>
+        <div className="agent-connection">
+          <label className="agent-connection-field">
+            <span>Base URL</span>
+            <input
+              data-testid="agent-backend"
+              className="input"
+              type="text"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder={lastConnection?.base_url || defaultBaseUrl}
+            />
+          </label>
+          <label className="agent-connection-field">
+            <span>API Key</span>
+            <input
+              data-testid="agent-api-key"
+              className="input"
+              type="password"
+              autoComplete="new-password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={usesCustomBaseUrl
+                ? "请输入此 Base URL 对应的 API Key"
+                : defaults?.has_api_key ? "使用服务端已配置的 API Key" : "请输入 API Key"}
+            />
+          </label>
+          <label className="agent-connection-field">
+            <span>Model</span>
+            <input
+              data-testid="agent-model"
+              className="input"
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={lastConnection?.model || defaults?.model || "deepseek-flash"}
+            />
+          </label>
+        </div>
+        <div className="controls-row">
+          <input
+            data-testid="agent-input"
+            className="input input-grow"
+            type="text"
+            value={prompt}
+            onChange={(e) => {
+              setPrompt(e.target.value);
+              if (validationErr && e.target.value.trim()) {
+                setValidationErr("");
+              }
+            }}
+            placeholder="输入投研问题，例如：我想知道最近3天a股电力行业的情况"
+            aria-label="研究问题输入框"
+          />
+          <select
+            className="select"
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            aria-label="研究模式"
+          >
+            <option value="auto">智能模式 (Auto)</option>
+            <option value="value">价值投资 (Value)</option>
+            <option value="quant">量化策略 (Quant)</option>
+          </select>
+          <button
+            data-testid="agent-submit"
+            className="btn"
+            type="submit"
+            disabled={running}
+          >
+            {running ? "研判执行中..." : "发起投研分析"}
+          </button>
+        </div>
       </form>
 
       <div className="controls-row">

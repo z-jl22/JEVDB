@@ -24,7 +24,7 @@ from stock_research.mcp_server import web_tools
 from stock_research.mcp_server.web_tools import SSRFError, web_fetch_url, web_search
 from stock_research.storage.schema import db_session, load_static_baseline
 
-REPO_ROOT = Path("/home/tao/JEVDB")
+REPO_ROOT = Path(__file__).resolve().parents[2]
 LIVE_ENABLED = os.getenv("RUN_LIVE_TESTS", "0") == "1"
 
 
@@ -67,7 +67,7 @@ def test_pi_binary_mcp_json_and_skills_metadata() -> None:
     assert mcp_path.exists()
     mcp_cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
     srv = mcp_cfg["mcpServers"]["stock_research"]
-    assert srv["command"] == "/home/tao/JEVDB/stock_research/.venv/bin/python"
+    assert (REPO_ROOT / srv["command"]).absolute() == REPO_ROOT / "stock_research/.venv/bin/python"
     assert srv["args"] == ["-m", "stock_research.mcp_server.server"]
     assert srv["exposure"] == "direct"
     assert srv["timeout"] == 120

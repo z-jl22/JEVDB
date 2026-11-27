@@ -159,8 +159,8 @@ FastAPI 后端（`stock_research/api/app.py`）托管构建后的 React SPA（`s
 ## 4. 关键技术决策与交叉核验机制
 
 ### 4.1 非侵入式外围架构设计
-- **决策**：`/home/tao/JEVDB` 原有 C++ 扩展（`src/`）、Python 包装（`python/jevdb/`）、股票示例（`examples/stock_trading/`）及现有测试保持 100% 只读，所有新增逻辑全部封装在 `stock_research/`、`.pi/` 与 `docs_project/` 中；运行时在 DuckDB 中通过 `source='static_baseline'` 标签联合查询原有静态 CSV 与动态表。
-- **收益**：保证核心 16 项基线测试零退化，同时完整继承 JEVDB 论文中的 SBF 布隆剪枝与语义 SQL 能力。
+- **实现**：C++ 扩展位于 `src/`，Python 包装位于 `python/jevdb/`。应用从 `stock_research/data/baseline/` 读取静态 CSV，以 `source='static_baseline'` 标记入库，与动态采集数据联合查询。
+- **验证**：静态基线加载、量化交易和语义 SQL 由对应的回归测试覆盖。
 
 ### 4.2 `ShimServer` 解决 JEVDB C++ 与 DeepSeek API 协议不兼容
 - **问题**：JEVDB C++ (`src/llm_client.cpp`) 向大模型发送 OpenAI `response_format: {"type": "json_schema", "strict": true}`，而 DeepSeek 官方接口仅支持 `{"type": "json_object"}`，且推理模型可能附带 `reasoning_content` 或 Markdown 代码块围栏。

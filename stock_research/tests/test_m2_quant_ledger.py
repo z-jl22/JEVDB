@@ -13,6 +13,7 @@ import unittest
 
 import jevdb
 
+from stock_research.config import BASELINE_DATA_PATH
 from stock_research.quant import (
     BUILTIN_STRATEGIES,
     BacktestResult,
@@ -36,7 +37,7 @@ from stock_research.quant import (
 from stock_research.quant.backtest import _align_comparison_curves
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PRICES_CSV = REPO_ROOT / "examples" / "stock_trading" / "prices.csv"
+PRICES_CSV = REPO_ROOT / BASELINE_DATA_PATH / "prices.csv"
 
 
 def _assert_json_safe(testcase: unittest.TestCase, obj: object) -> None:

@@ -39,6 +39,9 @@ packages = [
 [tool.setuptools.package-dir]
 "stock_research" = "."
 
+[tool.setuptools.package-data]
+stock_research = ["data/baseline/*.csv"]
+
 [tool.pytest.ini_options]
 markers = [
     "live: marks tests that hit live external APIs (run with RUN_LIVE_TESTS=1)",

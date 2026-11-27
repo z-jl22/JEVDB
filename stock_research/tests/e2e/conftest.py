@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pytest
 
-REPO_ROOT = Path("/home/tao/JEVDB")
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SCRATCH_BASE = Path("/home/tao/.gemini/antigravity/scratch/teamwork_tmp/e2e")
 CHROMIUM_PATH = "/usr/bin/chromium"
 CHROMIUM_ARGS = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
@@ -26,7 +26,7 @@ ARPO_PYTHON = "/home/tao/miniconda3/envs/arpo/bin/python"
 CORE_TRACKED_PATHS = [
     "src",
     "python",
-    "examples",
+    "stock_research/data/baseline",
     "tools",
     "docs",
     "scripts",
@@ -35,9 +35,6 @@ CORE_TRACKED_PATHS = [
     "extension_config.cmake",
     "pyproject.toml",
     "README.md",
-    "README_中文运行指南.md",
-    "quick_start_openai.py",
-    "reviews.py",
     "LICENSE",
     ".gitignore",
     ".clang-format",

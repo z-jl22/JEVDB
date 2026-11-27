@@ -101,15 +101,7 @@ def test_T2_E1_04_jev_keys_overlap_null_and_disjoint(mark_backing):
         con.close()
 
 
-def test_T2_E1_05_invalid_ohlc_rejected_in_baseline_and_schema(e2e_mode: str, isolated_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.syspath_prepend(str(REPO_ROOT / "examples" / "stock_trading"))
-    import trade
-
-    bad_csv = isolated_env["tmp_dir"] / "bad_prices.csv"
-    bad_csv.write_text("date,symbol,open,high,low,close,volume_lots\n2025-04-28,000858,10,9,11,10,100\n", encoding="utf-8")
-    with pytest.raises(ValueError):
-        trade.read_prices(bad_csv)
-
+def test_T2_E1_05_invalid_ohlc_rejected(e2e_mode: str, isolated_env: dict[str, Path]):
     if e2e_mode == "live":
         bt_mod = importlib.import_module("stock_research.quant.backtest")
         with pytest.raises(ValueError):

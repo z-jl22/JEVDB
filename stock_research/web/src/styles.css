@@ -236,6 +236,57 @@ body {
   min-width: 200px;
 }
 
+.agent-connection {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.agent-connection-field {
+  flex: 1 1 220px;
+}
+
+.market-query-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.agent-connection-field,
+.market-query-fields label,
+.market-sector-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.market-query-fields :is(.input, .select),
+.market-sector-controls .input {
+  min-width: 0;
+}
+
+.market-sector-controls {
+  align-items: flex-end;
+}
+
+.market-sector-controls label {
+  flex: 1 1 145px;
+}
+
+.market-details > .card {
+  min-width: 0;
+}
+
+.agent-connection-field input::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
 .btn {
   background: var(--accent-strong);
   color: #fff;
@@ -701,10 +752,36 @@ body {
   font-size: 13px;
 }
 
+.news-title a {
+  color: var(--accent);
+}
+
+.news-update-hint {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .news-meta {
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 3px;
+}
+
+.news-sentiment {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.news-sentiment[data-sentiment="positive"] {
+  color: var(--up);
+}
+
+.news-sentiment[data-sentiment="negative"] {
+  color: var(--down);
 }
 
 .checkbox-row {

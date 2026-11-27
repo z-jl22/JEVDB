@@ -27,6 +27,7 @@ _REQUIRED_TABLES = frozenset(
         "fundamentals",
         "edgar_filings",
         "news_events",
+        "news_sentiment_analysis",
         "earnings_calendar",
         "ingestion_runs",
         "static_trading_rules",
@@ -135,6 +136,16 @@ SCHEMA_DDL = [
         sentiment_label VARCHAR,
         keywords_json VARCHAR,
         keys VARCHAR[]
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS news_sentiment_analysis (
+        event_id VARCHAR PRIMARY KEY,
+        market VARCHAR NOT NULL,
+        symbol VARCHAR NOT NULL,
+        title VARCHAR,
+        summary VARCHAR,
+        sentiment VARCHAR NOT NULL
     )
     """,
     """
@@ -281,8 +292,8 @@ def ensure_baseline_seeded(
     news_cnt = con.execute(
         "SELECT COUNT(*) FROM news_events WHERE source = 'static_baseline'"
     ).fetchone()[0]
-    if (bars_cnt == 0 or news_cnt == 0) and settings.static_examples_dir.exists():
-        load_static_baseline(con, settings.static_examples_dir)
+    if (bars_cnt == 0 or news_cnt == 0) and settings.baseline_data_dir.exists():
+        load_static_baseline(con, settings.baseline_data_dir)
     if seed_strategies:
         from stock_research.quant.strategies import ensure_builtin_strategies
 
@@ -313,9 +324,9 @@ def load_static_baseline(
     con: duckdb.DuckDBPyConnection,
     examples_dir: str | Path | None = None,
 ) -> dict[str, int]:
-    """Idempotently load examples/stock_trading/{prices,news,trading_rules}.csv into DuckDB."""
+    """Idempotently load the bundled prices, news, and trading rules into DuckDB."""
     ensure_schema(con)
-    base_dir = Path(examples_dir) if examples_dir is not None else get_settings().static_examples_dir
+    base_dir = Path(examples_dir) if examples_dir is not None else get_settings().baseline_data_dir
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     prices_rows = _read_commented_csv(base_dir / "prices.csv")

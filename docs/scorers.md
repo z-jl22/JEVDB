@@ -16,7 +16,7 @@ Return finite probabilities from 0 through 1. Changes to scoring configuration
 must change those explicit identity fields. Registration is attached to catalog
 function metadata, so independently loaded extension libraries can use the API.
 
-The [example](../examples/scorer/scorer.cpp) scores common string prefixes divided
+The [example](../tools/fixtures/scorer/scorer.cpp) scores common string prefixes divided
 by the longer string length. It supports pairwise holds/probability calls; it is
 an API demonstration rather than a semantic model.
 

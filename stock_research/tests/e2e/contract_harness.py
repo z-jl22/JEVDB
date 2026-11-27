@@ -33,10 +33,12 @@ from uuid import uuid4
 
 import jevdb
 
-REPO_ROOT = Path("/home/tao/JEVDB")
-STATIC_PRICES_CSV = REPO_ROOT / "examples" / "stock_trading" / "prices.csv"
-STATIC_NEWS_CSV = REPO_ROOT / "examples" / "stock_trading" / "news.csv"
-STATIC_RULES_CSV = REPO_ROOT / "examples" / "stock_trading" / "trading_rules.csv"
+from stock_research.config import BASELINE_DATA_PATH, DEFAULT_REPO_ROOT
+
+REPO_ROOT = DEFAULT_REPO_ROOT
+STATIC_PRICES_CSV = REPO_ROOT / BASELINE_DATA_PATH / "prices.csv"
+STATIC_NEWS_CSV = REPO_ROOT / BASELINE_DATA_PATH / "news.csv"
+STATIC_RULES_CSV = REPO_ROOT / BASELINE_DATA_PATH / "trading_rules.csv"
 
 MCP_CONTRACT_TOOLS = [
     "jevdb_semantic_query",
