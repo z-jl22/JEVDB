@@ -21,6 +21,7 @@ import {
   type NewsItem,
   type SectorConstituent,
 } from "../api";
+import { chartTheme } from "../chartTheme";
 
 const DEFAULT_KLINE_DAYS = 120;
 const MIN_KLINE_DAYS = 1;
@@ -65,9 +66,10 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
   const [queriedSector, setQueriedSector] = useState(initialQuery.sector);
   const [daysInput, setDaysInput] = useState(String(initialQuery.days));
   const [queriedStock, setQueriedStock] = useState<{
-    symbol: string; market: "CN" | "US"; days: number; name: string | null;
+    symbol: string; inputSymbol: string; market: "CN" | "US"; days: number; name: string | null;
   }>({
     symbol: initialQuery.symbol,
+    inputSymbol: initialQuery.symbol,
     market: initialQuery.market,
     days: initialQuery.days,
     name: null,
@@ -128,7 +130,7 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
       ]);
       if (controller.signal.aborted) return;
       const marketBars = barsRes.status === "fulfilled" ? barsRes.value : null;
-      const stock = { symbol: marketBars?.symbol ?? cleanSym, name: marketBars?.name ?? null, market: mkt, days: lookback };
+      const stock = { symbol: marketBars?.symbol ?? cleanSym, inputSymbol: cleanSym, name: marketBars?.name ?? null, market: mkt, days: lookback };
       setQueriedStock(stock);
       setBars(marketBars?.bars ?? []);
       setFundamentals(fundRes.status === "fulfilled" ? fundRes.value.fundamentals : []);
@@ -173,26 +175,26 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
     if (!el) return;
 
     const chart = createChart(el, {
-      width: Math.max(el.clientWidth, 320),
+      width: Math.max(el.clientWidth, 1),
       height: Math.max(el.clientHeight, 340),
       layout: {
-        background: { type: ColorType.Solid, color: "#0a111f" },
-        textColor: "#cbd5e1",
+        background: { type: ColorType.Solid, color: chartTheme.surface },
+        textColor: chartTheme.text,
       },
       grid: {
-        vertLines: { color: "rgba(32, 49, 79, 0.55)" },
-        horzLines: { color: "rgba(32, 49, 79, 0.55)" },
+        vertLines: { color: chartTheme.grid },
+        horzLines: { color: chartTheme.grid },
       },
-      timeScale: { borderColor: "#20314f", timeVisible: true },
-      rightPriceScale: { borderColor: "#20314f" },
+      timeScale: { borderColor: chartTheme.border, timeVisible: true },
+      rightPriceScale: { borderColor: chartTheme.border },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#ef4444",
-      downColor: "#22c55e",
+      upColor: chartTheme.up,
+      downColor: chartTheme.down,
       borderVisible: false,
-      wickUpColor: "#ef4444",
-      wickDownColor: "#22c55e",
+      wickUpColor: chartTheme.up,
+      wickDownColor: chartTheme.down,
     });
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
@@ -252,7 +254,7 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
       sorted.map(([dt, b]) => ({
         time: dt as Time,
         value: typeof b.volume === "number" && Number.isFinite(b.volume) ? b.volume : 0,
-        color: b.close >= b.open ? "rgba(239, 68, 68, 0.45)" : "rgba(34, 197, 94, 0.45)",
+        color: b.close >= b.open ? chartTheme.upFill : chartTheme.downFill,
       }))
     );
 
@@ -367,77 +369,53 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
 
   const latestFund = fundamentals[0];
   const latestBar = bars.length > 0 ? bars[bars.length - 1] : null;
-  const stockTitle = [queriedStock.name, queriedStock.symbol, queriedStock.market].filter(Boolean).join(" · ");
+  const edited = symbol.trim().toUpperCase() !== queriedStock.inputSymbol || market !== queriedStock.market ||
+    Number(daysInput) !== queriedStock.days;
+  const marketName = queriedStock.market === "CN" ? "A 股" : "美股";
 
-  return (
-    <div>
-      <div className="market-query-fields">
-        <label>
-          <span>股票代码</span>
-          <input
-            className="input"
-            value={symbol}
-            onChange={(e) => setSymbol(e.target.value)}
-            placeholder="如 000858 / AAPL"
-          />
-        </label>
-        <label>
-          <span>市场选择</span>
-          <select
-            className="select"
-            value={market}
-            onChange={(e) => setMarket(e.target.value === "US" ? "US" : "CN")}
-          >
-            <option value="CN">A股 (CN)</option>
-            <option value="US">美股 (US)</option>
-          </select>
-        </label>
-        <label>
-          <span>K线天数</span>
-          <input
-            className="input"
-            type="number"
-            min={MIN_KLINE_DAYS}
-            max={MAX_KLINE_DAYS}
-            value={daysInput}
-            placeholder={String(DEFAULT_KLINE_DAYS)}
-            onChange={(e) => setDaysInput(e.target.value)}
-          />
-        </label>
-      </div>
-      <div className="controls-row">
-        <button
-          type="button"
-          className="btn"
-          disabled={loading || Boolean(ingesting)}
-          onClick={() => {
-            setStatusMsg("");
-            const lookback = readDays();
-            if (lookback !== null) {
-              void loadMarketData({ symbol, market, sector: sectorName, days: lookback }, { fetchMissing: true, remember: true });
-            }
-          }}
-        >
-          {loading ? "加载中..." : "查询行情与基本面"}
-        </button>
-        <button
-          type="button"
-          className="btn btn-secondary"
-          disabled={Boolean(ingesting) || loading}
-          onClick={() => void handleIngest("stock")}
-        >
-          {ingesting === "stock" ? "拉取中..." : "按需拉取个股"}
-        </button>
-      </div>
-
-      {statusMsg && <div className="ok-banner">{statusMsg}</div>}
-      {errorMsg && <div className="err">{errorMsg}</div>}
-
-      <div className="kpi-grid">
-        <div className="kpi-card">
-          <div className="kpi-label">最新收盘价 ({queriedStock.symbol})</div>
-          <div className="kpi-val">{latestBar ? formatNumber(latestBar.close) : "—"}</div>
-        </div>
+  const quotePanel = (
+    <section className="panel chart-panel quote-panel" id="market-price">
+          <div className="panel-heading">
+            <div>
+              <h2>{queriedStock.name || queriedStock.symbol} <small>{queriedStock.name ? queriedStock.symbol + " · " : ""}{marketName}</small></h2>
+              <p>日线 K 线与成交量{latestBar && " · " + (latestBar.date || latestBar.trade_date || "")}</p>
+              <p className="muted">{bars.length} 根日线 / 请求 {queriedStock.days} 根</p>
+            </div>
+            <div className="quote"><span>最新收盘</span><strong>{formatNumber(latestBar?.close)}</strong></div>
+          </div>
+          {latestBar && (
+            <dl className="quote-tape">
+              <div><dt>开盘</dt><dd>{formatNumber(latestBar.open)}</dd></div>
+              <div><dt>最高</dt><dd>{formatNumber(latestBar.high)}</dd></div>
+              <div><dt>最低</dt><dd>{formatNumber(latestBar.low)}</dd></div>
+              <div><dt>成交量</dt><dd>{formatNumber(latestBar.volume)}</dd></div>
+            </dl>
+          )}
+          <div className="chart-periods" aria-label="日线范围">
+            <span>{latestBar?.source || "日线"}</span>
+            {[20, 60, 120].map((days) => (
+              <button key={days} type="button" className="btn-chip" aria-pressed={!edited && queriedStock.days === days}
+                disabled={loading || Boolean(ingesting) || edited} onClick={() => {
+                  setDaysInput(String(days));
+                  void loadMarketData({ symbol: queriedStock.inputSymbol, market: queriedStock.market, sector: queriedSector, days }, { remember: true });
+                }}>{days} 日</button>
+            ))}
+          </div>
+          <div className="chart-frame">
+            <div ref={chartElRef} data-testid="market-chart" className="chart-box market-chart"
+              role="region" aria-label="日线 K 线与成交量" />
+            {bars.length === 0 && (loading ? (
+              <div className="chart-empty" role="status">正在加载日线</div>
+            ) : (
+              <div className="chart-empty" data-testid="market-bars-empty">暂无日线数据。请核对代码和市场，或稍后重试。</div>
+            ))}
+          </div>
+        </section>
+  );
+  const fundamentalsPanel = (
+    <section className="panel fundamentals-panel" id="market-fundamentals">
+          <div className="panel-heading"><h2>基本面</h2>{latestFund?.source && <small>{latestFund.source}</small>}</div>
+          <div className="kpi-grid fundamentals-grid">
         <div className="kpi-card">
           <div className="kpi-label">市盈率 PE (TTM)</div>
           <div className="kpi-val">{formatNumber(latestFund?.pe_ttm)}</div>
@@ -467,32 +445,20 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
           </div>
         </div>
         <div className="kpi-card">
-          <div className="kpi-label">样本K线 / 报告期</div>
-          <div className="kpi-val" style={{ fontSize: 13 }}>
-            {bars.length} 根 / 请求 {queriedStock.days} 根 · {latestFund?.report_date || "静态/按需"}
-          </div>
+          <div className="kpi-label">报告期</div>
+          <div className="kpi-val">{latestFund?.report_date || "—"}</div>
         </div>
       </div>
 
-      <div className="card" style={{ marginBottom: 14 }}>
-        <h3 className="card-title">
-          日线 K 线与成交量 ({stockTitle})
-        </h3>
-        {!loading && bars.length === 0 && (
-          <div className="info-banner" data-testid="market-bars-empty">
-            暂无日线数据。请核对股票代码和市场，或稍后重试。
-          </div>
-        )}
-        <div ref={chartElRef} data-testid="market-chart" className="chart-box" />
-      </div>
-
-      <div className="grid-2 market-details">
-        <div className="card">
+        </section>
+  );
+  const sectorPanel = (
+    <section className="card sector-panel" id="market-sector">
           <h3 className="card-title">
-            行业概览与成分股 ({queriedSector} · 去重 {constituents.length} 只)
+            行业成分股 · {queriedSector} ({constituents.length})
           </h3>
           <div className="controls-row market-sector-controls">
-            <label>
+            <label className="field">
               <span>行业板块</span>
               <input
                 className="input"
@@ -533,30 +499,35 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
               ))}
             </div>
           )}
-          <div className="table-wrap" style={{ maxHeight: 240 }}>
-            <table className="data-table">
+          <div className="table-wrap sector-table-scroll" tabIndex={0} role="region" aria-label="行业成分股表">
+            <table className="data-table constituents-table">
               <thead>
                 <tr>
-                  <th>代码</th>
-                  <th>名称</th>
+                  <th>标的</th>
                   <th>最新价</th>
                   <th>涨跌幅%</th>
                   <th>PE</th>
-                  <th>来源</th>
                 </tr>
               </thead>
               <tbody>
                 {constituents.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="muted">
+                    <td colSpan={4} className="muted">
                       {sectorSuggestions.length > 0 ? "选定候选板块后，点击「同步板块」。" : "暂无板块成分股（可点击「同步板块」按需抓取）"}
                     </td>
                   </tr>
                 ) : (
                   constituents.slice(0, 15).map((c) => (
-                    <tr key={`${c.sector_name}-${c.symbol}`}>
-                      <td>{c.symbol}</td>
-                      <td>{c.name || "—"}</td>
+                    <tr key={`${c.sector_name}-${c.symbol}`} data-active={c.symbol === queriedStock.symbol && queriedStock.market === "CN"}>
+                      <td><button className="symbol-link" type="button" title={c.source || undefined} disabled={loading || Boolean(ingesting)}
+                        onClick={() => {
+                          setSymbol(c.symbol);
+                          setMarket("CN");
+                          setDaysInput(String(queriedStock.days));
+                          void loadMarketData({ symbol: c.symbol, market: "CN", sector: queriedSector, days: queriedStock.days }, { remember: true });
+                        }}>{c.name && <span className="symbol-name">{c.name}</span>}
+                        <span className="symbol-code">{c.symbol}</span>
+                      </button></td>
                       <td>{formatNumber(c.price)}</td>
                       <td className={(c.change_pct ?? 0) >= 0 ? "pos-num" : "neg-num"}>
                         {c.change_pct !== null && c.change_pct !== undefined
@@ -564,17 +535,17 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
                           : "—"}
                       </td>
                       <td>{formatNumber(c.pe)}</td>
-                      <td>{c.source || "—"}</td>
                     </tr>
                   ))
                 )}
               </tbody>
             </table>
           </div>
-        </div>
-
-        <div className="card">
-          <h3 className="card-title">新闻公告与 SEC EDGAR 申报 ({news.length + edgarFilings.length})</h3>
+        </section>
+  );
+  const newsPanel = (
+    <section className="card news-panel" id="market-news">
+          <h3 className="card-title">新闻与公告 ({news.length + edgarFilings.length})</h3>
           <p className="news-update-hint">
             点击「按需拉取个股」更新新闻并分析情绪。模型使用投研工作台的连接配置，待分析的新闻显示关键词判断结果。
           </p>
@@ -613,7 +584,62 @@ export default function MarketView({ modelConnection }: { modelConnection: Model
               ))
             )}
           </div>
+        </section>
+  );
+
+  return (
+    <div className="market-page flow">
+      <form noValidate className="controls-row terminal-toolbar" onSubmit={(event) => {
+        event.preventDefault();
+        if (loading || ingesting) return;
+        setStatusMsg("");
+        const lookback = readDays();
+        if (lookback !== null) {
+          void loadMarketData({ symbol, market, sector: sectorName, days: lookback }, { fetchMissing: true, remember: true });
+        }
+      }}>
+        <label className="field">
+          <span>股票代码</span>
+          <input className="input" value={symbol} onChange={(e) => setSymbol(e.target.value)}
+            placeholder="000858 / AAPL" aria-label="股票代码" />
+        </label>
+        <label className="field">
+          <span>市场</span>
+          <select className="select" value={market} aria-label="市场选择"
+            onChange={(e) => setMarket(e.target.value === "US" ? "US" : "CN")}>
+            <option value="CN">A 股</option>
+            <option value="US">美股</option>
+          </select>
+        </label>
+        <label className="field">
+          <span>日线天数</span>
+          <input className="input" type="number" min={MIN_KLINE_DAYS} max={MAX_KLINE_DAYS}
+            value={daysInput} placeholder={String(DEFAULT_KLINE_DAYS)}
+            onChange={(e) => setDaysInput(e.target.value)} aria-label="K线天数" />
+        </label>
+        <button type="submit" className="btn" disabled={loading || Boolean(ingesting)}>
+          {loading ? "加载中…" : "查询行情与基本面"}
+        </button>
+        <button type="button" className="btn btn-secondary" disabled={Boolean(ingesting) || loading}
+          onClick={() => void handleIngest("stock")}>
+          {ingesting === "stock" ? "拉取中…" : "按需拉取个股"}
+        </button>
+      </form>
+      {statusMsg && <div className="ok-banner" role="status">{statusMsg}</div>}
+      {errorMsg && <div className="err" role="alert">{errorMsg}</div>}
+
+      {edited && bars.length > 0 && (
+        <p className="result-notice" role="status">当前展示上次查询：{queriedStock.symbol} · {marketName}</p>
+      )}
+      <div className="market-data">
+        {sectorPanel}
+        <div className="market-main">
+          {quotePanel}
         </div>
+        <aside className="market-inspector" aria-label="基本面和公告">
+          {fundamentalsPanel}
+          {newsPanel}
+        </aside>
       </div>
     </div>
   );

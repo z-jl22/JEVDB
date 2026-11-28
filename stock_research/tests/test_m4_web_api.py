@@ -5,9 +5,11 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -26,10 +28,7 @@ from stock_research.storage.schema import db_session
 
 api_module = importlib.import_module("stock_research.api.app")
 
-SCRATCH_TMP_ROOT = Path(
-    "/home/tao/.gemini/antigravity/scratch/teamwork_tmp/049e943f-af5a-4f84-870b-79191be7fdea"
-)
-CHROMIUM_BIN = "/usr/bin/chromium"
+CHROMIUM_BIN = os.getenv("JEVDB_TEST_CHROMIUM") or shutil.which("chromium")
 
 
 @pytest.fixture()
@@ -854,7 +853,6 @@ def test_playwright_ui_all_views_validation_sse_and_reload_persistence(
 ) -> None:
     dist_index = Path(__file__).resolve().parents[1] / "web" / "dist" / "index.html"
     assert dist_index.is_file(), f"Built frontend missing at {dist_index}"
-    assert Path(CHROMIUM_BIN).exists(), f"Chromium missing at {CHROMIUM_BIN}"
 
     def _fake_agent(
         prompt: str,
@@ -914,8 +912,7 @@ def test_playwright_ui_all_views_validation_sse_and_reload_persistence(
         server.should_exit = True
         raise RuntimeError("Live test uvicorn server failed to start")
 
-    short_tmp = SCRATCH_TMP_ROOT.parent / f"pm4_{os.getpid()}"
-    short_tmp.mkdir(parents=True, exist_ok=True)
+    short_tmp = Path(tempfile.mkdtemp(prefix="jevdb-pw-"))
     driver_script = r"""
 import json, sys
 from playwright.sync_api import sync_playwright
@@ -937,8 +934,13 @@ with sync_playwright() as p:
     page.on("request", lambda r: agent_reqs.append(r.url) if r.method == "POST" and "/api/agent/" in r.url else None)
 
     page.goto(base_url + "/", wait_until="networkidle", timeout=20000)
+    page.locator("[data-tab='market'][aria-current='page']").wait_for()
+    page.locator("#section-market").wait_for(state="visible")
+    assert page.url == base_url + "/"
+    page.locator("[data-tab='agent']").click()
     page.locator("[data-testid='agent-input']").wait_for(state="visible", timeout=15000)
-    backend = page.get_by_role("textbox", name="Base URL", exact=True)
+    backend = page.get_by_test_id("agent-backend")
+    page.wait_for_function("document.querySelector('[data-testid=agent-backend]').placeholder === 'https://default.example/v1'")
     api_key = page.get_by_test_id("agent-api-key")
     model = page.get_by_test_id("agent-model")
     assert backend.get_attribute("placeholder") == "https://default.example/v1"
@@ -947,7 +949,7 @@ with sync_playwright() as p:
     assert api_key.get_attribute("type") == "password"
     assert backend.input_value() == api_key.input_value() == model.input_value() == ""
 
-    # 1. Inspect all 8 testids and chart canvas dimensions on initial load
+    # 1. Inspect each page independently and check chart canvas dimensions.
     selectors = [
         "[data-testid='agent-input']",
         "[data-testid='agent-submit']",
@@ -960,7 +962,19 @@ with sync_playwright() as p:
     ]
     views = {}
     for s in selectors:
+        tab = {
+            "[data-testid='market-chart']": "market",
+            "[data-testid='backtest-chart']": "quant",
+            "[data-testid='paper-holdings']": "paper",
+        }.get(s)
+        if tab:
+            page.locator(f"[data-tab='{tab}']").click()
+            page.locator(s).wait_for(state="visible")
+            assert page.locator("main > section:visible").count() == 1
         loc = page.locator(s).first
+        if s == "[data-testid='tool-calls-panel']":
+            assert not loc.is_visible()
+            page.locator(".trace-disclosure > summary").click()
         box = loc.bounding_box()
         chart_rect = page.evaluate(
             "(sel) => { const r = document.querySelector(sel); const c = r && r.querySelector('canvas, svg'); if (!c) return null; const rc = c.getBoundingClientRect(); return {width: rc.width, height: rc.height}; }",
@@ -969,12 +983,14 @@ with sync_playwright() as p:
         views[s] = {"visible": loc.is_visible(), "box": box, "chart": chart_rect}
 
     # 2. Empty prompt validation MUST block /api/agent/* requests
+    page.locator("[data-tab='agent']").click()
     page.locator("[data-testid='agent-input']").fill("   ")
     page.locator("[data-testid='agent-submit']").click()
     val_text = page.locator("[data-testid='agent-validation']").inner_text().strip()
     reqs_after_empty = list(agent_reqs)
 
     # 3. Real SSE research query flow in UI
+    page.locator(".connection-disclosure > summary").click()
     backend.fill("https://custom.example/v1")
     api_key.fill("test-browser-key")
     model.fill("vendor/custom-model")
@@ -985,7 +1001,7 @@ with sync_playwright() as p:
         timeout=15000,
     )
     page.wait_for_function(
-        "() => { const el = document.querySelector('[data-testid=\"agent-answer\"]'); return el && !['等待回答...', '正在核验结果...'].includes(el.innerText.trim()); }",
+        "() => { const el = document.querySelector('[data-testid=\"agent-answer\"]'); return el && !['提交研究问题后，结论和证据会显示在这里。', '正在核验结果...'].includes(el.innerText.trim()); }",
         timeout=15000,
     )
     tool_text = page.locator("[data-testid='tool-calls-panel']").inner_text().strip()
@@ -1000,6 +1016,7 @@ with sync_playwright() as p:
     backend.fill("https://unsent.example/v1")
     model.fill("unsent-model")
     page.reload(wait_until="networkidle", timeout=20000)
+    page.locator(".connection-disclosure > summary").click()
     assert api_key.input_value() == ""
     assert api_key.get_attribute("placeholder") == "请输入此 Base URL 对应的 API Key"
     assert backend.input_value() == model.input_value() == ""
@@ -1012,6 +1029,9 @@ with sync_playwright() as p:
     request_body = pending.value.post_data_json
     assert {key: request_body[key] for key in saved} == saved
     page.get_by_test_id("agent-answer").get_by_text("复用上次连接", exact=False).wait_for()
+    page.locator("[data-tab=paper]").click()
+    page.wait_for_url("**/#paper")
+    page.reload(wait_until="networkidle", timeout=20000)
     page.wait_for_function(
         "() => { const el = document.querySelector('[data-testid=\"paper-holdings\"]'); return el && el.innerText.trim().includes('000858'); }",
         timeout=15000,
@@ -1109,13 +1129,7 @@ print(json.dumps({
     finally:
         server.should_exit = True
         thread.join(timeout=5)
-        for child in short_tmp.glob("*"):
-            if child.is_dir():
-                import shutil
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                child.unlink(missing_ok=True)
-        short_tmp.rmdir()
+        shutil.rmtree(short_tmp)
 
 
 def test_playwright_paper_trading_ui_order_validation_t1_and_reload(
@@ -1123,7 +1137,6 @@ def test_playwright_paper_trading_ui_order_validation_t1_and_reload(
 ) -> None:
     dist_index = Path(__file__).resolve().parents[1] / "web" / "dist" / "index.html"
     assert dist_index.is_file(), f"Built frontend missing at {dist_index}"
-    assert Path(CHROMIUM_BIN).exists(), f"Chromium missing at {CHROMIUM_BIN}"
 
     port = _free_port()
     app = create_app()
@@ -1145,8 +1158,7 @@ def test_playwright_paper_trading_ui_order_validation_t1_and_reload(
         server.should_exit = True
         raise RuntimeError("Live test uvicorn server failed to start")
 
-    short_tmp = SCRATCH_TMP_ROOT.parent / f"pm4p_{os.getpid()}"
-    short_tmp.mkdir(parents=True, exist_ok=True)
+    short_tmp = Path(tempfile.mkdtemp(prefix="jevdb-pw-"))
     driver_script = r"""
 import json, sys
 from playwright.sync_api import sync_playwright
@@ -1266,13 +1278,7 @@ print(json.dumps({
     finally:
         server.should_exit = True
         thread.join(timeout=5)
-        for child in short_tmp.glob("*"):
-            if child.is_dir():
-                import shutil
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                child.unlink(missing_ok=True)
-        short_tmp.rmdir()
+        shutil.rmtree(short_tmp)
 
 
 def test_quant_custom_date_range_autofetch_and_risk_window(

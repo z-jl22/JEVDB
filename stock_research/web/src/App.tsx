@@ -1,141 +1,112 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { apiJson, type HealthResponse, type ModelConnectionOptions } from "./api";
-import AgentWorkspace from "./components/AgentWorkspace";
-import MarketView from "./components/MarketView";
-import QuantView from "./components/QuantView";
-import PaperView from "./components/PaperView";
+import { readLastConnection } from "./agentConnection";
 
-type TabId = "agent" | "market" | "quant" | "paper";
+const AgentWorkspace = lazy(() => import("./components/AgentWorkspace"));
+const MarketView = lazy(() => import("./components/MarketView"));
+const QuantView = lazy(() => import("./components/QuantView"));
+const PaperView = lazy(() => import("./components/PaperView"));
+const PAGES = {
+  agent: { title: "投研", icon: "M4 5h13a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3h-6l-5 4v-4H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm3 5h8m-8 3h5" },
+  market: { title: "行情", icon: "M5 3v5m0 5v7m7-17v3m0 6v8m7-17v8m0 5v4M3 8h4v5H3zm7-2h4v6h-4zm7 5h4v5h-4z" },
+  quant: { title: "策略回测", icon: "M3 3v17h18M7 14l4-5 4 3 5-7m-4 0h4v4" },
+  paper: { title: "模拟交易", icon: "M3 7h15a2 2 0 0 1 2 2v10H4a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3h12v3m3 5h-5a2 2 0 0 0 0 4h5" },
+};
+type Workspace = keyof typeof PAGES;
+const pageKeys = ["market", "quant", "paper", "agent"] as const;
 
-const TABS: Array<{ id: TabId; label: string }> = [
-  { id: "agent", label: "1. 投研 Agent 工作台" },
-  { id: "market", label: "2. 行情与基本面" },
-  { id: "quant", label: "3. 量化回测与风控" },
-  { id: "paper", label: "4. 模拟持仓与盈亏" },
-];
+function readPage(): Workspace {
+  const name = window.location.hash.slice(1);
+  return pageKeys.find((key) => key === name) ?? "market";
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<TabId>("agent");
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [modelConnection, setModelConnection] = useState<ModelConnectionOptions>({});
-
-  const sectionRefs = {
-    agent: useRef<HTMLElement | null>(null),
-    market: useRef<HTMLElement | null>(null),
-    quant: useRef<HTMLElement | null>(null),
-    paper: useRef<HTMLElement | null>(null),
-  };
+  const [active, setActive] = useState(readPage);
+  const [visited, setVisited] = useState(() => new Set([active]));
+  const [health, setHealth] = useState<HealthResponse | "offline" | null>(null);
+  const [modelConnection, setModelConnection] = useState<ModelConnectionOptions>(() => readLastConnection() ?? {});
+  const heading = useRef<HTMLHeadingElement>(null);
+  const pageTitle = PAGES[active].title;
 
   useEffect(() => {
-    void apiJson<HealthResponse>("/api/health")
-      .then((res) => setHealth(res))
-      .catch(() => {
-        // non-fatal status pill fallback
-      });
+    const navigate = () => {
+      const page = readPage();
+      setVisited((prior) => new Set(prior).add(page));
+      setActive(page);
+      window.scrollTo(0, 0);
+      requestAnimationFrame(() => heading.current?.focus({ preventScroll: true }));
+    };
+    window.addEventListener("hashchange", navigate);
+    return () => window.removeEventListener("hashchange", navigate);
   }, []);
 
-  const handleSelectTab = (tab: TabId) => {
-    setActiveTab(tab);
-    const el = sectionRefs[tab].current;
-    if (el && typeof el.scrollIntoView === "function") {
-      el.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-  };
+  useEffect(() => {
+    document.title = pageTitle + " · JEVDB 研究终端";
+  }, [pageTitle]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 8000);
+    void apiJson<HealthResponse>("/api/health", { signal: controller.signal })
+      .then(setHealth)
+      .catch(() => setHealth("offline"))
+      .finally(() => window.clearTimeout(timeout));
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, []);
+
+  const ready = health !== null && health !== "offline" && health.status?.toLowerCase() === "ok";
+  const status = ready ? "服务已连接" : health === null ? "服务连接中" : "服务不可用";
 
   return (
     <div className="app-shell">
-      <header className="top-nav">
-        <div className="brand">
-          <span className="brand-badge">JEVDB</span>
-          <div>
-            <h1 className="brand-title">股票研究与模拟交易工作台</h1>
-            <div className="brand-sub">
-              语义数据库 · Pi Agent + MCP · 量化回测 · A股 T+1 / 美股模拟账本
-            </div>
-          </div>
-        </div>
-
-        <nav className="nav-tabs" aria-label="核心功能视图导航">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              data-tab={t.id}
-              className={`nav-tab ${activeTab === t.id ? "active" : ""}`}
-              onClick={() => handleSelectTab(t.id)}
-            >
-              {t.label}
-            </button>
+      <a className="skip-link" href="#workspace-content" onClick={(event) => {
+        event.preventDefault();
+        heading.current?.focus();
+      }}>跳到工作区</a>
+      <header className="workbench-bar">
+        <a className="brand" href="#market" aria-label="JEVDB 行情首页">
+          <span className="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" fill="none"><path d="M8 20V9h5v13l-4 4H5v-5h2l1-1Zm10-11h5v11l-5 5h-5l5-5V9Z" fill="currentColor" /></svg>
+          </span>
+          <strong>JEVDB</strong>
+        </a>
+        <nav className="workspace-nav" aria-label="工作区">
+          {pageKeys.map((key) => (
+            <a href={"#" + key} data-tab={key} key={key} aria-current={active === key ? "page" : undefined}>
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d={PAGES[key].icon} /></svg>
+              <span>{PAGES[key].title}</span>
+            </a>
           ))}
         </nav>
-
-        <div className="health-pill">
-          {health
-            ? `API ${health.status.toUpperCase()} · JEVDB ${health.jevdb_version} · DuckDB ${health.duckdb_version}`
-            : "API 连接中..."}
+        <div className="service-state" data-state={ready ? "ready" : health === null ? "pending" : "offline"} role="status"
+          title={health && health !== "offline" ? "JEVDB " + health.jevdb_version + " · DuckDB " + health.duckdb_version : undefined}>
+          <span aria-hidden="true" />{status}
         </div>
       </header>
-
-      <main className="dashboard-main">
-        <section
-          ref={sectionRefs.agent}
-          id="section-agent"
-          className={`panel-section ${activeTab === "agent" ? "focused" : ""}`}
-        >
-          <div className="section-header">
-            <h2 className="section-title">
-              智能投研与交叉核验工作台
-              <span className="section-tag">Pi Agent + JEVDB MCP</span>
-            </h2>
-            <span className="muted">端到端流程：用户需求 → 工具调用 → 核验分析 → 依据展示</span>
-          </div>
-          <AgentWorkspace onConnectionChange={setModelConnection} />
-        </section>
-
-        <section
-          ref={sectionRefs.market}
-          id="section-market"
-          className={`panel-section ${activeTab === "market" ? "focused" : ""}`}
-        >
-          <div className="section-header">
-            <h2 className="section-title">
-              行情、基本面与行业信息看板
-              <span className="section-tag">AkShare · yfinance · EDGAR · Finnhub</span>
-            </h2>
-            <span className="muted">支持按需抓取 A 股 / 美股日线、财务估值、行业成分股与公告</span>
-          </div>
-          <MarketView modelConnection={modelConnection} />
-        </section>
-
-        <section
-          ref={sectionRefs.quant}
-          id="section-quant"
-          className={`panel-section ${activeTab === "quant" ? "focused" : ""}`}
-        >
-          <div className="section-header">
-            <h2 className="section-title">
-              量化策略回测与投资组合风控对比
-              <span className="section-tag">Value & Daily Quant · VaR / HHI</span>
-            </h2>
-            <span className="muted">确定性日频回测、多策略对比、95% VaR/CVaR 与相关性分析</span>
-          </div>
-          <QuantView />
-        </section>
-
-        <section
-          ref={sectionRefs.paper}
-          id="section-paper"
-          className={`panel-section ${activeTab === "paper" ? "focused" : ""}`}
-        >
-          <div className="section-header">
-            <h2 className="section-title">
-              持久化模拟交易账户与盈亏监控
-              <span className="section-tag">CN T+1 · 100股整数倍 · 费率与滑点</span>
-            </h2>
-            <span className="muted">支持跨日持仓追踪、T+1 解锁推进及规则拦截审计</span>
-          </div>
-          <PaperView />
-        </section>
+      <main className="workspace" id="workspace-content">
+        <header className="page-heading">
+          <h1 ref={heading} tabIndex={-1}>{pageTitle}</h1>
+        </header>
+        {pageKeys.filter((key) => visited.has(key)).map((key) => {
+          return (
+            <section key={key} id={"section-" + key} hidden={key !== active} aria-label={PAGES[key].title}>
+              <Suspense fallback={<p className="muted" role="status">正在打开工作区</p>}>
+                {key === "agent" ? (
+                  <AgentWorkspace onConnectionChange={setModelConnection} />
+                ) : key === "market" ? (
+                  <MarketView modelConnection={modelConnection} />
+                ) : key === "quant" ? (
+                  <QuantView />
+                ) : (
+                  <PaperView />
+                )}
+              </Suspense>
+            </section>
+          );
+        })}
       </main>
     </div>
   );

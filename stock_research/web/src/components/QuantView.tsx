@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import * as echarts from "echarts";
+import * as echarts from "../terminalCharts";
 import {
   apiJson,
   formatNumber,
@@ -8,8 +8,9 @@ import {
   type PortfolioRiskResult,
   type StrategySpec,
 } from "../api";
+import { chartTheme } from "../chartTheme";
 
-const SERIES_COLORS = ["#38bdf8", "#f59e0b", "#a855f7", "#22c55e", "#f43f5e"];
+const SERIES_COLORS = chartTheme.series;
 
 function isoDaysAgo(days: number): string {
   const dt = new Date();
@@ -36,6 +37,10 @@ export default function QuantView() {
   const [compareRes, setCompareRes] = useState<CompareResult | null>(null);
   const [riskRes, setRiskRes] = useState<PortfolioRiskResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [completedRun, setCompletedRun] = useState<{
+    symbols: string; start: string; end: string; capital: number; market: "CN" | "US"; strategies: string[];
+  } | null>(null);
+  const resultsHeading = useRef<HTMLHeadingElement>(null);
   const [errorMsg, setErrorMsg] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
 
@@ -113,6 +118,7 @@ export default function QuantView() {
             confidence: 0.95,
           }),
         });
+        setCompletedRun({ symbols: syms.join(","), start: sDate, end: eDate, capital: initCap, market: mkt, strategies: stratIds });
         setCompareRes(cmp);
         setRiskRes(risk);
         if (cmp.auto_fetched_symbols && cmp.auto_fetched_symbols.length > 0) {
@@ -207,13 +213,14 @@ export default function QuantView() {
       ? compareRes.aligned_drawdown_curves
       : [];
     const stratKeys = compareRes?.strategy_ids || [];
+    const strategyName = (id: string) => compareRes?.results?.[id]?.strategy_name || id;
     const dates =
       eqRows.length > 0
         ? eqRows.map((p) => String(p.date))
         : (compareRes?.benchmark_curve || []).map((p) => p.date);
 
     const series: echarts.SeriesOption[] = stratKeys.map((sid, idx) => ({
-      name: `${sid} 净值`,
+      name: `${strategyName(sid)} 净值`,
       type: "line",
       smooth: true,
       showSymbol: false,
@@ -234,8 +241,8 @@ export default function QuantView() {
         smooth: true,
         showSymbol: false,
         yAxisIndex: 0,
-        lineStyle: { width: 1.5, type: "dashed", color: "#94a3b8" },
-        itemStyle: { color: "#94a3b8" },
+        lineStyle: { width: 1.5, type: "dashed", color: chartTheme.muted },
+        itemStyle: { color: chartTheme.muted },
         data: compareRes.benchmark_curve.map((p) => Number(p.equity.toFixed(2))),
       });
     }
@@ -243,12 +250,13 @@ export default function QuantView() {
     if (stratKeys.length > 0 && ddRows.length > 0) {
       const primarySid = stratKeys[0];
       series.push({
-        name: `${primarySid} 回撤%`,
+        name: `${strategyName(primarySid)} 回撤`,
         type: "line",
         yAxisIndex: 1,
         showSymbol: false,
-        lineStyle: { width: 1.2, color: "rgba(239, 68, 68, 0.75)" },
-        areaStyle: { color: "rgba(239, 68, 68, 0.12)" },
+        lineStyle: { width: 1.2, color: chartTheme.down },
+        itemStyle: { color: chartTheme.down },
+        areaStyle: { color: chartTheme.drawdownFill },
         data: ddRows.map((p) => {
           if (p[primarySid] == null) return null;
           const val = Number(p[primarySid]);
@@ -259,33 +267,41 @@ export default function QuantView() {
 
     chart.setOption(
       {
+        animation: false,
         backgroundColor: "transparent",
-        tooltip: { trigger: "axis" },
+        textStyle: { fontFamily: "system-ui, sans-serif" },
+        tooltip: { ...chartTheme.tooltip, trigger: "axis" },
         legend: {
+          type: "scroll",
           top: 6,
-          textStyle: { color: "#cbd5e1", fontSize: 11 },
+          left: 12,
+          right: 12,
+          pageTextStyle: { color: chartTheme.muted },
+          pageIconColor: chartTheme.accent,
+          pageIconInactiveColor: chartTheme.border,
+          textStyle: { color: chartTheme.text, fontSize: 11 },
         },
-        grid: { left: 58, right: 54, top: 44, bottom: 28 },
+        grid: { left: 58, right: 54, top: 55, bottom: 28 },
         xAxis: {
           type: "category",
           data: dates,
-          axisLabel: { color: "#94a3b8", fontSize: 11 },
-          axisLine: { lineStyle: { color: "#20314f" } },
+          axisLabel: { color: chartTheme.muted, fontSize: 11 },
+          axisLine: { lineStyle: { color: chartTheme.border } },
         },
         yAxis: [
           {
             type: "value",
             name: "净值",
             scale: true,
-            nameTextStyle: { color: "#94a3b8", fontSize: 11 },
-            axisLabel: { color: "#94a3b8", fontSize: 11 },
-            splitLine: { lineStyle: { color: "rgba(32, 49, 79, 0.5)" } },
+            nameTextStyle: { color: chartTheme.muted, fontSize: 11 },
+            axisLabel: { color: chartTheme.muted, fontSize: 11 },
+            splitLine: { lineStyle: { color: chartTheme.grid } },
           },
           {
             type: "value",
             name: "回撤%",
-            nameTextStyle: { color: "#94a3b8", fontSize: 11 },
-            axisLabel: { color: "#94a3b8", fontSize: 11 },
+            nameTextStyle: { color: chartTheme.muted, fontSize: 11 },
+            axisLabel: { color: chartTheme.muted, fontSize: 11 },
             splitLine: { show: false },
           },
         ],
@@ -320,25 +336,27 @@ export default function QuantView() {
 
     chart.setOption(
       {
+        animation: false,
         backgroundColor: "transparent",
-        tooltip: { position: "top" },
+        textStyle: { fontFamily: "system-ui, sans-serif" },
+        tooltip: { ...chartTheme.tooltip, position: "top" },
         grid: { left: 68, right: 24, top: 20, bottom: 38 },
         xAxis: {
           type: "category",
           data: syms.length > 0 ? syms : ["暂无"],
-          axisLabel: { color: "#cbd5e1", fontSize: 11 },
+          axisLabel: { color: chartTheme.text, fontSize: 11 },
         },
         yAxis: {
           type: "category",
           data: syms.length > 0 ? syms : ["暂无"],
-          axisLabel: { color: "#cbd5e1", fontSize: 11 },
+          axisLabel: { color: chartTheme.text, fontSize: 11 },
         },
         visualMap: {
           min: -1,
           max: 1,
           show: false,
           inRange: {
-            color: ["#22c55e", "#1e293b", "#ef4444"],
+            color: [chartTheme.down, chartTheme.grid, chartTheme.up],
           },
         },
         series: [
@@ -442,6 +460,17 @@ export default function QuantView() {
       ? String(compareRes!.aligned_equity_curves[eqCount - 1].date)
       : compareRes?.end_date || endDate;
 
+  const resultIsPrevious = completedRun && (
+    loading || Boolean(errorMsg) || completedRun.start !== startDate || completedRun.end !== endDate ||
+    completedRun.market !== market || completedRun.capital !== capital ||
+    completedRun.symbols !== symbolsText.split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean).join(",") ||
+    completedRun.strategies.join(",") !== selectedIds.join(",")
+  );
+
+  const styleNames: Record<string, string> = {
+    value: "价值投资", quant_daily: "日频量化", sentiment_hybrid: "情绪混合",
+  };
+
   const datePresets = [
     { label: "静态演示 (25/04-05)", start: "2025-04-24", end: "2025-05-15" },
     { label: "近 1 月", start: isoDaysAgo(30), end: isoDaysAgo(0) },
@@ -451,8 +480,13 @@ export default function QuantView() {
   ];
 
   return (
-    <div>
-      <div className="checkbox-row">
+    <div className="terminal-split quant-page">
+      <aside className="panel setup-panel flow" aria-label="回测配置">
+        <div className="panel-heading"><h2>回测配置</h2>
+          <button type="button" className="btn-mini mobile-jump"
+            onClick={() => resultsHeading.current?.focus()}>查看结果</button>
+        </div>
+        <div className="checkbox-row strategy-list" role="group" aria-label="对比策略">
         {strategies.map((st) => (
           <label key={st.strategy_id} className="checkbox-pill">
             <input
@@ -461,20 +495,22 @@ export default function QuantView() {
               onChange={() => toggleStrategy(st.strategy_id)}
             />
             <span>
-              {st.name} ({st.style})
+              {st.name}
             </span>
           </label>
         ))}
       </div>
 
-      <form onSubmit={handleRunSubmit} className="controls-row">
+      <form onSubmit={handleRunSubmit} className="setup-form">
+        <label className="field wide"><span>标的代码</span>
         <input
           className="input"
           value={symbolsText}
           onChange={(e) => setSymbolsText(e.target.value)}
           placeholder="回测标的逗号分隔，如 000858,601318"
           aria-label="回测标的列表"
-        />
+        /></label>
+        <label className="field"><span>市场</span>
         <select
           className="select"
           value={market}
@@ -483,7 +519,7 @@ export default function QuantView() {
         >
           <option value="CN">A股 (CN)</option>
           <option value="US">美股 (US)</option>
-        </select>
+        </select></label>
         <label className="date-field">
           <span>开始</span>
           <input
@@ -506,17 +542,18 @@ export default function QuantView() {
             aria-label="回测结束日期"
           />
         </label>
+        <label className="field"><span>初始资金</span>
         <input
           className="input"
-          style={{ width: 120 }}
+          required
           type="number"
           min={1000}
-          step={10000}
-          value={capital}
-          onChange={(e) => setCapital(Number(e.target.value) || 100000)}
+          step="any"
+          value={Number.isNaN(capital) ? "" : capital}
+          onChange={(e) => setCapital(e.target.value === "" ? NaN : Number(e.target.value))}
           aria-label="初始资金"
-        />
-        <label className="checkbox-pill" title="若本地 DuckDB 尚未缓存该时间段行情，自动按需从 AkShare / yfinance 拉取">
+        /></label>
+        <label className="checkbox-pill wide" title="若本地 DuckDB 尚未缓存该时间段行情，自动按需从 AkShare / yfinance 拉取">
           <input
             type="checkbox"
             checked={autoFetch}
@@ -524,12 +561,13 @@ export default function QuantView() {
           />
           <span>缺失区间自动补齐行情</span>
         </label>
-        <button type="submit" className="btn" disabled={loading}>
+        <button type="submit" className="btn wide" disabled={loading}>
           {loading ? "回测计算中..." : "运行多策略回测对比"}
         </button>
         <button
           type="button"
-          className="btn btn-secondary"
+          className="btn btn-secondary wide"
+          aria-expanded={showCreate}
           onClick={() => setShowCreate((v) => !v)}
         >
           {showCreate ? "收起新建策略" : "+ 新建量化策略"}
@@ -537,14 +575,15 @@ export default function QuantView() {
       </form>
 
       <div className="preset-row">
-        <span className="muted">快捷时间段：</span>
+        <span className="muted">快捷回测</span>
         {datePresets.map((p) => {
           const isActive = startDate === p.start && endDate === p.end;
           return (
             <button
               key={p.label}
               type="button"
-              disabled={loading}
+              disabled={loading || !Number.isFinite(capital) || capital < 1000}
+              aria-pressed={isActive}
               className={`btn-chip${isActive ? " active" : ""}`}
               onClick={() => applyDatePreset(p.start, p.end)}
             >
@@ -555,14 +594,15 @@ export default function QuantView() {
       </div>
 
       {showCreate && (
-        <form onSubmit={handleCreateStrategy} className="card" style={{ marginBottom: 12 }}>
-          <h3 className="card-title">新建并持久化量化/价值策略</h3>
+        <form onSubmit={handleCreateStrategy} className="setup-create flow">
+          <h3 className="card-title">新建策略</h3>
           <div className="controls-row">
             <input
               className="input"
               value={newStratId}
               onChange={(e) => setNewStratId(e.target.value)}
-              placeholder="strategy_id (英文下划线)"
+              placeholder="策略 ID（英文与下划线）"
+              aria-label="策略 ID"
               required
             />
             <input
@@ -570,11 +610,13 @@ export default function QuantView() {
               value={newStratName}
               onChange={(e) => setNewStratName(e.target.value)}
               placeholder="策略名称"
+              aria-label="策略名称"
               required
             />
             <select
               className="select"
               value={newStratStyle}
+              aria-label="策略风格"
               onChange={(e) =>
                 setNewStratStyle(
                   e.target.value as "quant_daily" | "value" | "sentiment_hybrid"
@@ -590,6 +632,7 @@ export default function QuantView() {
               value={newStratDesc}
               onChange={(e) => setNewStratDesc(e.target.value)}
               placeholder="策略说明"
+              aria-label="策略说明"
             />
             <button type="submit" className="btn">
               保存策略
@@ -598,27 +641,34 @@ export default function QuantView() {
         </form>
       )}
 
-      {statusMsg && <div className="ok-banner">{statusMsg}</div>}
-      {errorMsg && <div className="err">{errorMsg}</div>}
+      </aside>
+      <div className="results-column flow" aria-label="回测结果">
+      {statusMsg && <div className="ok-banner" role="status">{statusMsg}</div>}
+      {errorMsg && <div className="err" role="alert">{errorMsg}</div>}
+      {resultIsPrevious && completedRun && (
+        <p className="result-notice" role="status">
+          显示上次回测：{completedRun.symbols} · {completedRun.start} 至 {completedRun.end} · {formatNumber(completedRun.capital)}
+        </p>
+      )}
 
-      <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card" id="quant-chart">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-          <h3 className="card-title" style={{ margin: 0 }}>
-            多策略净值曲线与回撤对比 (Equity & Drawdown)
-          </h3>
+          <h2 ref={resultsHeading} tabIndex={-1} className="card-title" style={{ margin: 0 }}>净值与回撤</h2>
           <span className="muted" data-testid="quant-active-range">
-            实际区间：{activeStart} ~ {activeEnd}
-            {eqCount > 0 ? `（${eqCount} 个交易日）` : ""}
+            {eqCount > 0 ? `实际区间：${activeStart} ~ ${activeEnd}（${eqCount} 个交易日）` : "暂无交易日数据"}
           </span>
         </div>
-        <div ref={chartElRef} data-testid="backtest-chart" className="chart-box" />
+        <div className="chart-frame">
+          <div ref={chartElRef} data-testid="backtest-chart" className="chart-box" role="img" aria-label="策略净值与回撤图" />
+          {!compareRes && <div className="chart-empty">{loading ? "正在计算回测" : "运行回测后查看净值与回撤"}</div>}
+        </div>
       </div>
 
-      <div className="grid-2">
-        <div className="card">
-          <h3 className="card-title">策略绩效与风险指标对比</h3>
-          <div className="table-wrap">
-            <table className="data-table">
+      <div className="flow">
+        <div className="card" id="quant-performance">
+          <h3 className="card-title">策略绩效</h3>
+          <div className="table-wrap" tabIndex={0} role="region" aria-label="策略绩效表">
+            <table className="data-table numeric-after-two">
               <thead>
                 <tr>
                   <th>策略</th>
@@ -642,7 +692,7 @@ export default function QuantView() {
                   Object.values(compareRes?.results || {}).map((r) => (
                     <tr key={r.strategy_id}>
                       <td>{r.strategy_name || r.strategy_id}</td>
-                      <td>{r.style}</td>
+                      <td>{styleNames[r.style] ?? r.style}</td>
                       <td
                         className={
                           (r.metrics.total_return ?? 0) >= 0 ? "pos-num" : "neg-num"
@@ -663,13 +713,13 @@ export default function QuantView() {
           </div>
         </div>
 
-        <div className="card">
+        <div className="card" id="quant-risk">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
             <h3 className="card-title" style={{ margin: 0 }}>
-              投资组合风险评估与相关性矩阵
+              组合风险与相关性
             </h3>
             <span className="muted">
-              统计窗口：{compareRes?.start_date || startDate} ~ {compareRes?.end_date || endDate}
+              {completedRun && `统计窗口：${completedRun.start} ~ ${completedRun.end}`}
             </span>
           </div>
           <div className="kpi-grid">
@@ -690,8 +740,9 @@ export default function QuantView() {
               </div>
             </div>
           </div>
-          <div ref={corrElRef} className="chart-box-sm" style={{ height: 210, minHeight: 210 }} />
+          <div ref={corrElRef} className="chart-box-sm" style={{ height: 210 }} role="img" aria-label="组合相关性热图" />
         </div>
+      </div>
       </div>
     </div>
   );
