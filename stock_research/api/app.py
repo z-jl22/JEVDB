@@ -12,7 +12,6 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
 
 import anyio
 import duckdb
@@ -25,6 +24,7 @@ from pydantic import BaseModel, BeforeValidator, Field, SecretStr, field_validat
 
 from stock_research.agent.pi_runner import run_research_query
 from stock_research.config import get_settings
+from stock_research.api.workbench_settings import normalize_model_url, router as workbench_settings_router
 from stock_research.quant.backtest import (
     _to_date as _backtest_to_date,
     classify_news_sentiment,
@@ -240,25 +240,7 @@ class ModelConnectionRequest(BaseModel):
     @field_validator("base_url")
     @classmethod
     def _validate_base_url(cls, value: str | None) -> str | None:
-        url = (value or "").strip().rstrip("/")
-        if not url:
-            return None
-        try:
-            parts = urlsplit(url)
-            if (
-                parts.scheme in {"http", "https"}
-                and parts.hostname
-                and parts.port != 0
-                and parts.username is None
-                and "?" not in url
-                and "#" not in url
-                and "\\" not in url
-                and not any(char.isspace() or ord(char) < 32 for char in url)
-            ):
-                return url
-        except ValueError:
-            pass
-        raise ValueError("请输入有效的 HTTP 或 HTTPS Base URL，例如 https://api.deepseek.com/v1。")
+        return normalize_model_url(value or "")
 
     @field_validator("model")
     @classmethod
@@ -602,12 +584,15 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
 
+    application.include_router(workbench_settings_router)
+
     @application.exception_handler(RequestValidationError)
     async def validation_exception_handler(
         _request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         errors = exc.errors()
-        if _request.url.path.startswith("/api/agent/") or _request.url.path == "/api/market/ingest":
+        if (_request.url.path.startswith("/api/agent/")
+                or _request.url.path in {"/api/market/ingest", "/api/workbench/settings"}):
             for error in errors:
                 error.pop("input", None)
         return JSONResponse(

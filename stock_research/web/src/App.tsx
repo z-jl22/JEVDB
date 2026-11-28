@@ -6,6 +6,10 @@ const AgentWorkspace = lazy(() => import("./components/AgentWorkspace"));
 const MarketView = lazy(() => import("./components/MarketView"));
 const QuantView = lazy(() => import("./components/QuantView"));
 const PaperView = lazy(() => import("./components/PaperView"));
+const SettingsWorkspace = lazy(() => import("./components/SettingsWorkspace"));
+
+const settingsIcon = "M10 3h4l.6 2.1 1.9 1.1 2.1-.5 2 3.5-1.5 1.5v2.6l1.5 1.5-2 3.5-2.1-.5-1.9 1.1-.6 2.1h-4l-.6-2.1-1.9-1.1-2.1.5-2-3.5 1.5-1.5v-2.6L3.4 9.2l2-3.5 2.1.5 1.9-1.1L10 3Z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z";
+
 const PAGES = {
   agent: { title: "投研", icon: "M4 5h13a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3h-6l-5 4v-4H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm3 5h8m-8 3h5" },
   market: { title: "行情", icon: "M5 3v5m0 5v7m7-17v3m0 6v8m7-17v8m0 5v4M3 8h4v5H3zm7-2h4v6h-4zm7 5h4v5h-4z" },
@@ -13,11 +17,12 @@ const PAGES = {
   paper: { title: "模拟交易", icon: "M3 7h15a2 2 0 0 1 2 2v10H4a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3h12v3m3 5h-5a2 2 0 0 0 0 4h5" },
 };
 type Workspace = keyof typeof PAGES;
+type Page = Workspace | "settings";
 const pageKeys = ["market", "quant", "paper", "agent"] as const;
 
-function readPage(): Workspace {
+function readPage(): Page {
   const name = window.location.hash.slice(1);
-  return pageKeys.find((key) => key === name) ?? "market";
+  return name === "settings" ? "settings" : pageKeys.find((key) => key === name) ?? "market";
 }
 
 export default function App() {
@@ -25,8 +30,9 @@ export default function App() {
   const [visited, setVisited] = useState(() => new Set([active]));
   const [health, setHealth] = useState<HealthResponse | "offline" | null>(null);
   const [modelConnection, setModelConnection] = useState<ModelConnectionOptions>(() => readLastConnection() ?? {});
+  const [settingsRevision, setSettingsRevision] = useState(0);
   const heading = useRef<HTMLHeadingElement>(null);
-  const pageTitle = PAGES[active].title;
+  const pageTitle = active === "settings" ? "设置" : PAGES[active].title;
 
   useEffect(() => {
     const navigate = () => {
@@ -81,6 +87,12 @@ export default function App() {
             </a>
           ))}
         </nav>
+        <a className="settings-entry" href="#settings" data-tab="settings" aria-current={active === "settings" ? "page" : undefined}>
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+            <path d={settingsIcon} />
+          </svg>
+          <span>设置</span>
+        </a>
         <div className="service-state" data-state={ready ? "ready" : health === null ? "pending" : "offline"} role="status"
           title={health && health !== "offline" ? "JEVDB " + health.jevdb_version + " · DuckDB " + health.duckdb_version : undefined}>
           <span aria-hidden="true" />{status}
@@ -95,7 +107,7 @@ export default function App() {
             <section key={key} id={"section-" + key} hidden={key !== active} aria-label={PAGES[key].title}>
               <Suspense fallback={<p className="muted" role="status">正在打开工作区</p>}>
                 {key === "agent" ? (
-                  <AgentWorkspace onConnectionChange={setModelConnection} />
+                  <AgentWorkspace onConnectionChange={setModelConnection} settingsRevision={settingsRevision} />
                 ) : key === "market" ? (
                   <MarketView modelConnection={modelConnection} />
                 ) : key === "quant" ? (
@@ -107,6 +119,11 @@ export default function App() {
             </section>
           );
         })}
+        {visited.has("settings") && <section hidden={active !== "settings"} id="section-settings" aria-label="设置">
+          <Suspense fallback={<p className="muted" role="status">正在打开设置</p>}>
+            <SettingsWorkspace onModelDefaultsChange={() => setSettingsRevision((value) => value + 1)} />
+          </Suspense>
+        </section>}
       </main>
     </div>
   );

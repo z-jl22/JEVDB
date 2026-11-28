@@ -21,8 +21,9 @@ const PRESET_PROMPTS = [
   "结合行情与财务数据给出 A 股日频量化交易策略建议",
 ];
 
-export default function AgentWorkspace({ onConnectionChange }: {
+export default function AgentWorkspace({ onConnectionChange, settingsRevision }: {
   onConnectionChange: (connection: ModelConnectionOptions) => void;
+  settingsRevision: number;
 }) {
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState("auto");
@@ -58,7 +59,7 @@ export default function AgentWorkspace({ onConnectionChange }: {
       .then(setDefaults)
       .catch(() => undefined);
     return () => controller.abort();
-  }, []);
+  }, [settingsRevision]);
 
   useEffect(() => () => requestRef.current?.abort(), []);
 
@@ -276,7 +277,18 @@ export default function AgentWorkspace({ onConnectionChange }: {
       <section className="composer panel" aria-label="研究提问">
       <form onSubmit={handleSubmit} className="query-form">
         <details className="disclosure connection-disclosure">
-          <summary>模型连接</summary>
+          <summary>临时模型连接</summary>
+          <div className="connection-links">
+            <a href="#settings">管理服务端默认值</a>
+            {(baseUrl || model || apiKey || lastConnection) && <button type="button" className="btn-mini"
+              onClick={() => {
+                setBaseUrl("");
+                setModel("");
+                setApiKey("");
+                setLastConnection(null);
+                try { localStorage.removeItem(LAST_CONNECTION_KEY); } catch { /* Current page still uses defaults. */ }
+              }}>使用服务端默认值</button>}
+          </div>
         <div className="agent-connection">
           <label className="field">
             <span>服务地址</span>

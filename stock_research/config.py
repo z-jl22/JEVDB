@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+
+from stock_research.settings_store import read_overrides
 
 DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_DATA_PATH = Path("stock_research/data/baseline")
@@ -33,8 +35,8 @@ class Settings:
     llm_timeout: float
 
 
-def get_settings(ensure_dirs: bool = True) -> Settings:
-    """Build runtime settings dynamically from environment variables."""
+def get_settings(ensure_dirs: bool = True, *, use_saved: bool = True) -> Settings:
+    """Resolve environment defaults and saved workbench overrides."""
     repo_root = Path(os.getenv("JEVDB_REPO_ROOT", str(DEFAULT_REPO_ROOT)))
     runtime_dir = Path(
         os.getenv("STOCK_RESEARCH_RUNTIME_DIR", str(repo_root / ".tmp" / "stock_research"))
@@ -62,7 +64,7 @@ def get_settings(ensure_dirs: bool = True) -> Settings:
         strategy_dir.mkdir(parents=True, exist_ok=True)
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    return Settings(
+    defaults = Settings(
         repo_root=repo_root,
         runtime_dir=runtime_dir,
         cache_dir=cache_dir,
@@ -85,3 +87,9 @@ def get_settings(ensure_dirs: bool = True) -> Settings:
         llm_threads=int(os.getenv("JEVDB_LLM_THREADS", "4")),
         llm_timeout=float(os.getenv("JEVDB_LLM_TIMEOUT", "120.0")),
     )
+    if not use_saved:
+        return defaults
+    overrides = read_overrides(runtime_dir)
+    if "deepseek_api_key" not in overrides and overrides.get("deepseek_base_url", defaults.deepseek_base_url) != defaults.deepseek_base_url:
+        overrides["deepseek_api_key"] = ""
+    return replace(defaults, **overrides)
