@@ -13,6 +13,7 @@ import {
   type ModelConnectionOptions,
   type ToolCallItem,
 } from "../api";
+import { LAST_CONNECTION_KEY, readLastConnection } from "../agentConnection";
 
 const PRESET_PROMPTS = [
   "我想知道最近3天a股电力行业的情况",
@@ -20,22 +21,9 @@ const PRESET_PROMPTS = [
   "结合行情与财务数据给出 A 股日频量化交易策略建议",
 ];
 
-const LAST_CONNECTION_KEY = "jevdb.agent.lastConnection";
-
-function readLastConnection(): AgentConnection | null {
-  try {
-    const data = JSON.parse(localStorage.getItem(LAST_CONNECTION_KEY) ?? "null") as Partial<AgentConnection> | null;
-    if (typeof data?.base_url === "string" && data.base_url && typeof data.model === "string" && data.model) {
-      return { base_url: data.base_url, model: data.model };
-    }
-  } catch {
-    // Storage can be unavailable in restricted browser contexts.
-  }
-  return null;
-}
-
-export default function AgentWorkspace({ onConnectionChange }: {
+export default function AgentWorkspace({ onConnectionChange, settingsRevision }: {
   onConnectionChange: (connection: ModelConnectionOptions) => void;
+  settingsRevision: number;
 }) {
   const [prompt, setPrompt] = useState("");
   const [mode, setMode] = useState("auto");
@@ -70,11 +58,10 @@ export default function AgentWorkspace({ onConnectionChange }: {
     void apiJson<AgentSettings>("/api/agent/settings", { signal: controller.signal })
       .then(setDefaults)
       .catch(() => undefined);
-    return () => {
-      controller.abort();
-      requestRef.current?.abort();
-    };
-  }, []);
+    return () => controller.abort();
+  }, [settingsRevision]);
+
+  useEffect(() => () => requestRef.current?.abort(), []);
 
   const showRunError = (message: string) => {
     setRunError(message);
@@ -100,7 +87,7 @@ export default function AgentWorkspace({ onConnectionChange }: {
     };
     let remembered = false;
     const rememberConnection = (connection?: AgentConnection) => {
-      if (remembered) return;
+      if (remembered || (!request.base_url && !request.model)) return;
       const next = {
         base_url: connection?.base_url ?? request.base_url ?? defaults?.base_url,
         model: connection?.model ?? request.model ?? defaults?.model,
@@ -282,27 +269,29 @@ export default function AgentWorkspace({ onConnectionChange }: {
     if (stage === "running") {
       return "正在核验结果...";
     }
-    return "等待回答...";
+    return "提交研究问题后，结论和证据会显示在这里。";
   };
 
   return (
-    <div>
-      <div className="flow-steps">
-        <span className={`flow-pill ${prompt.trim() ? "active" : ""}`}>1. 用户需求</span>
-        <span>→</span>
-        <span className={`flow-pill ${running || toolCalls.length > 0 ? "active" : ""}`}>
-          2. Pi Agent + JEVDB MCP 工具调用
-        </span>
-        <span>→</span>
-        <span className={`flow-pill ${verification ? "active" : ""}`}>3. 交叉核验</span>
-        <span>→</span>
-        <span className={`flow-pill ${stage === "done" ? "active" : ""}`}>4. 结果展示</span>
-      </div>
-
-      <form onSubmit={handleSubmit}>
+    <div className="agent-page flow">
+      <section className="composer panel" aria-label="研究提问">
+      <form onSubmit={handleSubmit} className="query-form">
+        <details className="disclosure connection-disclosure">
+          <summary>临时模型连接</summary>
+          <div className="connection-links">
+            <a href="#settings">管理服务端默认值</a>
+            {(baseUrl || model || apiKey || lastConnection) && <button type="button" className="btn-mini"
+              onClick={() => {
+                setBaseUrl("");
+                setModel("");
+                setApiKey("");
+                setLastConnection(null);
+                try { localStorage.removeItem(LAST_CONNECTION_KEY); } catch { /* Current page still uses defaults. */ }
+              }}>使用服务端默认值</button>}
+          </div>
         <div className="agent-connection">
-          <label className="agent-connection-field">
-            <span>Base URL</span>
+          <label className="field">
+            <span>服务地址</span>
             <input
               data-testid="agent-backend"
               className="input"
@@ -315,7 +304,7 @@ export default function AgentWorkspace({ onConnectionChange }: {
               placeholder={lastConnection?.base_url || defaultBaseUrl}
             />
           </label>
-          <label className="agent-connection-field">
+          <label className="field">
             <span>API Key</span>
             <input
               data-testid="agent-api-key"
@@ -329,8 +318,8 @@ export default function AgentWorkspace({ onConnectionChange }: {
                 : defaults?.has_api_key ? "使用服务端已配置的 API Key" : "请输入 API Key"}
             />
           </label>
-          <label className="agent-connection-field">
-            <span>Model</span>
+          <label className="field">
+            <span>模型</span>
             <input
               data-testid="agent-model"
               className="input"
@@ -343,44 +332,52 @@ export default function AgentWorkspace({ onConnectionChange }: {
             />
           </label>
         </div>
-        <div className="controls-row">
-          <input
-            data-testid="agent-input"
-            className="input input-grow"
-            type="text"
-            value={prompt}
-            onChange={(e) => {
-              setPrompt(e.target.value);
-              if (validationErr && e.target.value.trim()) {
-                setValidationErr("");
-              }
-            }}
-            placeholder="输入投研问题，例如：我想知道最近3天a股电力行业的情况"
-            aria-label="研究问题输入框"
-          />
-          <select
-            className="select"
-            value={mode}
-            onChange={(e) => setMode(e.target.value)}
-            aria-label="研究模式"
-          >
-            <option value="auto">智能模式 (Auto)</option>
-            <option value="value">价值投资 (Value)</option>
-            <option value="quant">量化策略 (Quant)</option>
-          </select>
-          <button
-            data-testid="agent-submit"
-            className="btn"
-            type="submit"
-            disabled={running}
-          >
-            {running ? "研判执行中..." : "发起投研分析"}
-          </button>
+        </details>
+
+        <textarea
+          data-testid="agent-input"
+          className="input"
+          rows={2}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              if (!running) event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          value={prompt}
+          onChange={(e) => {
+            setPrompt(e.target.value);
+            if (validationErr && e.target.value.trim()) {
+              setValidationErr("");
+            }
+          }}
+          placeholder="想研究哪个市场、行业或标的？"
+          aria-label="研究问题输入框"
+        />
+        <div className="query-actions">
+        <select
+          className="select"
+          value={mode}
+          onChange={(e) => setMode(e.target.value)}
+          aria-label="研究模式"
+        >
+          <option value="auto">智能模式</option>
+          <option value="value">价值投资</option>
+          <option value="quant">量化策略</option>
+        </select>
+        <button
+          data-testid="agent-submit"
+          className="btn"
+          type="submit"
+          disabled={running}
+        >
+          {running ? "研判执行中..." : "发起投研分析"}
+        </button>
         </div>
       </form>
 
       <div className="controls-row">
-        <span className="muted">快捷示例：</span>
+        <span className="muted">试试这些问题</span>
         {PRESET_PROMPTS.map((item) => (
           <button
             key={item}
@@ -412,20 +409,17 @@ export default function AgentWorkspace({ onConnectionChange }: {
         </div>
       )}
 
-      <div className="grid-2">
-        <div className="card">
-          <h3 className="card-title">工具调用链路 (Tool Calls Trace)</h3>
-          <div data-testid="tool-calls-panel" className="agent-panel-box">
-            {renderToolCallsContent()}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-head-row">
-            <h3 className="card-title" style={{ margin: 0 }}>
-              核验结论与依据 (Verified Research Answer)
-              {durationMs ? ` · ${durationMs}ms` : ""}
-            </h3>
+      </section>
+      <div className="research-output">
+      <section className="panel answer-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>研究结论</h2>
+              {durationMs != null && durationMs > 0 && <p>耗时 {(durationMs / 1000).toFixed(2)} 秒</p>}
+            </div>
+            <span className="text-badge" data-tone={verification ? (verification.grounded ?? verification.passed ? "good" : "caution") : "neutral"} role="status">
+              {verification ? (verification.grounded ?? verification.passed ? "已核验" : "有待核验项") : running ? "核验尚未完成" : "暂无核验结果"}
+            </span>
             {answer && (
               <div className="card-head-actions">
                 <button
@@ -445,24 +439,21 @@ export default function AgentWorkspace({ onConnectionChange }: {
               </div>
             )}
           </div>
+          {verification && ((verification.ungrounded_numbers?.length || 0) > 0 ||
+            (verification.unverified_urls?.length || 0) > 0 || (verification.warnings?.length || 0) > 0) && (
+            <div className="info-banner verification-notes" role="status">
+              {verification.ungrounded_numbers?.length ? <div>待核验数值：{verification.ungrounded_numbers.join("、")}</div> : null}
+              {verification.unverified_urls?.length ? <div>待核验链接：{verification.unverified_urls.join("、")}</div> : null}
+              {verification.warnings?.map((warning) => <div key={warning}>{warning}</div>)}
+            </div>
+          )}
+          <div className={sources.length > 0 ? "answer-content with-evidence" : "answer-content"}>
           <div data-testid="agent-answer" className="agent-panel-box md-answer">
             {renderAnswerContent()}
           </div>
 
-          {verification && (
-            <div className="info-banner" style={{ marginTop: 10, marginBottom: 0 }}>
-              核验状态：{verification.grounded ?? verification.passed ? "通过 (Grounded)" : "存在待核验项"}
-              {Array.isArray(verification.ungrounded_numbers) &&
-                verification.ungrounded_numbers.length > 0 &&
-                ` · 未落地数值: ${verification.ungrounded_numbers.join(", ")}`}
-              {Array.isArray(verification.warnings) &&
-                verification.warnings.length > 0 &&
-                ` · 提示: ${verification.warnings.join("; ")}`}
-            </div>
-          )}
-
           {sources.length > 0 && (
-            <div className="source-badges">
+            <aside className="evidence" aria-label="证据来源"><h3>证据来源</h3><div className="source-badges">
               {sources.map((src) =>
                 isSafeHttpUrl(src) ? (
                   <a
@@ -480,9 +471,26 @@ export default function AgentWorkspace({ onConnectionChange }: {
                   </span>
                 )
               )}
-            </div>
+            </div></aside>
           )}
-        </div>
+          </div>
+      </section>
+      <details className="disclosure trace-disclosure">
+        <summary>工具调用轨迹 <span>{running ? "执行中" : toolCalls.length ? toolCalls.length + " 次调用" : "暂无调用"}</span></summary>
+      <div className="flow-steps">
+        <span className={`flow-pill ${prompt.trim() ? "active" : ""}`}>1. 用户需求</span>
+        <span>→</span>
+        <span className={`flow-pill ${running || toolCalls.length > 0 ? "active" : ""}`}>
+          2. 检索证据
+        </span>
+        <span>→</span>
+        <span className={`flow-pill ${verification ? "active" : ""}`}>3. 交叉核验</span>
+        <span>→</span>
+        <span className={`flow-pill ${stage === "done" ? "active" : ""}`}>4. 结果展示</span>
+      </div>
+
+        <div data-testid="tool-calls-panel" className="agent-panel-box">{renderToolCallsContent()}</div>
+      </details>
       </div>
     </div>
   );

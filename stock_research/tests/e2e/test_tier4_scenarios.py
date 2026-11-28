@@ -61,8 +61,9 @@ def test_T4_S1_power_sector_last_3_days_cli_and_web(e2e_mode: str, isolated_env:
             {"action": "click_if_present", "selector": "[data-tab='agent']"},
             {"action": "fill", "selector": "[data-testid='agent-input']", "value": prompt},
             {"action": "click", "selector": "[data-testid='agent-submit']"},
+            {"action": "click_if_present", "selector": ".trace-disclosure > summary"},
             {"action": "wait_for_nonempty_text", "selector": "[data-testid='tool-calls-panel']", "exclude": ["等待调用工具...", "正在执行工具链..."], "timeout": 120000},
-            {"action": "wait_for_nonempty_text", "selector": "[data-testid='agent-answer']", "exclude": ["等待回答...", "正在核验结果..."], "timeout": 300000},
+            {"action": "wait_for_nonempty_text", "selector": "[data-testid='agent-answer']", "exclude": ["等待回答...", "提交研究问题后，结论和证据会显示在这里。", "正在核验结果..."], "timeout": 300000},
             {"action": "inspect_selectors", "selectors": ["[data-testid='tool-calls-panel']", "[data-testid='agent-answer']"], "key": "s1"},
         ])
         assert res["console_errors"] == [] and res["page_errors"] == [] and res["server_errors"] == []
@@ -296,8 +297,9 @@ def test_T4_S5_playwright_full_4_view_web_e2e(e2e_mode: str, isolated_env: dict[
             {"action": "click_if_present", "selector": "[data-tab='agent']"},
             {"action": "fill", "selector": "[data-testid='agent-input']", "value": prompt},
             {"action": "click", "selector": "[data-testid='agent-submit']"},
+            {"action": "click_if_present", "selector": ".trace-disclosure > summary"},
             {"action": "wait_for_nonempty_text", "selector": "[data-testid='tool-calls-panel']", "exclude": ["等待调用工具...", "正在执行工具链..."], "timeout": 120000},
-            {"action": "wait_for_nonempty_text", "selector": "[data-testid='agent-answer']", "exclude": ["等待回答...", "正在核验结果..."], "timeout": 300000},
+            {"action": "wait_for_nonempty_text", "selector": "[data-testid='agent-answer']", "exclude": ["等待回答...", "提交研究问题后，结论和证据会显示在这里。", "正在核验结果..."], "timeout": 300000},
             {"action": "inspect_selectors", "selectors": ["[data-testid='agent-input']", "[data-testid='agent-submit']", "[data-testid='tool-calls-panel']", "[data-testid='agent-answer']"], "key": "v1"},
             # View 2: Market & Fundamentals
             {"action": "click_if_present", "selector": "[data-tab='market']"},

@@ -1505,21 +1505,32 @@ def test_T1_E8_05_ui_renders_all_4_core_views_playwright(e2e_mode: str, isolated
             "[data-testid='paper-holdings']",
             "[data-testid='paper-pnl-chart']",
         ]
-        res = playwright_runner.run_steps([
-            {"action": "goto", "url": f"{base_url}/"},
-            {"action": "wait_for_selector", "selector": "[data-testid='agent-input']"},
-            {"action": "inspect_selectors", "selectors": selectors, "key": "views"},
-        ])
+        view_surfaces = [
+            ("agent", selectors[:4], selectors[0]),
+            ("market", selectors[4:5], selectors[4]),
+            ("quant", selectors[5:6], selectors[5]),
+            ("paper", selectors[6:], selectors[7]),
+        ]
+        steps = [{"action": "goto", "url": f"{base_url}/"}]
+        for tab, view_selectors, visible_selector in view_surfaces:
+            steps.extend([
+                {"action": "click", "selector": f"[data-tab='{tab}']"},
+                {"action": "wait_for_selector", "selector": visible_selector},
+                {"action": "inspect_selectors", "selectors": view_selectors, "key": tab},
+            ])
+        res = playwright_runner.run_steps(steps)
         assert res["console_errors"] == []
         assert res["page_errors"] == []
         assert res["server_errors"] == []
-        views = res["results"]["views"]
+        views = {sel: info for tab, _, _ in view_surfaces for sel, info in res["results"][tab].items()}
         for sel in selectors:
             assert views[sel]["exists"] is True, f"Missing selector {sel}"
-        for chart_sel in ("[data-testid='market-chart']", "[data-testid='backtest-chart']", "[data-testid='paper-pnl-chart']"):
-            if views[chart_sel]["visible"]:
-                assert views[chart_sel]["chart"]["width"] > 0
-                assert views[chart_sel]["chart"]["height"] > 0
+        if e2e_mode == "live":
+            assert not views[selectors[2]]["visible"], "Tool trace should be collapsed initially"
+        for chart_sel in (selectors[4], selectors[5], selectors[7]):
+            assert views[chart_sel]["visible"]
+            assert views[chart_sel]["chart"]["width"] > 0
+            assert views[chart_sel]["chart"]["height"] > 0
     finally:
         _stop_web_backend(handle)
 
